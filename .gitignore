@@ -1,4 +1,6 @@
 /target/
+/vendor/
+/tmp/
 **/*.rs.bk
 
 # Snap packaging specific rules

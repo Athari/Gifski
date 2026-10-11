@@ -1,0 +1,27 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Gifski (input.mov)",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [ "build", "--bin=gifski", "--features", "video" ],
+            },
+            "args": [
+                "--output", "${workspaceFolder}/tmp/output.gif",
+                "--quality", "1",
+                "--motion-quality", "100",
+                "--lossy-quality", "100",
+                "--extra",
+                "--width", "512",
+                "--height", "512",
+                "${workspaceFolder}/tmp/input.mov",
+            ],
+            "env": {
+                "PATH": "${workspaceFolder}/vendor/ffmpeg/bin;${env:PATH}"
+            },
+            "cwd": "${workspaceFolder}",
+        }
+    ]
+}

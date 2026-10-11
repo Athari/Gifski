@@ -1,0 +1,29 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "cargo build (dev)",
+            "type": "cargo",
+            "command": "build",
+            "args": [ "--features", "video" ],
+            "problemMatcher": [ "$rustc" ],
+            "group": { "kind": "build", "isDefault": true },
+        },
+        {
+            "label": "cargo build (release)",
+            "type": "cargo",
+            "command": "build",
+            "args": [ "--release", "--features", "video" ],
+            "problemMatcher": [ "$rustc" ],
+            "group": "build",
+        },
+        {
+            "label": "cargo test",
+            "type": "cargo",
+            "command": "test",
+            "args": [ "--features", "video" ],
+            "problemMatcher": [ "$rustc" ],
+            "group": "test",
+        }
+    ]
+}

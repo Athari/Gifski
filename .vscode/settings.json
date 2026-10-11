@@ -1,0 +1,9 @@
+{
+    "rust-analyzer.cargo.features": [
+        "video"
+    ],
+    "rust-analyzer.runnables.extraArgs": [
+        "--features",
+        "video"
+    ],
+}
