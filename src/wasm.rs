@@ -25,6 +25,7 @@ impl GifskiWasm {
             quality,
             fast: false,
             repeat: Repeat::Infinite,
+            global_palette: false,
         };
 
         Ok(Self {

@@ -35,7 +35,7 @@
 
 use encoderust::RustEncoder;
 use gif::DisposalMethod;
-use imagequant::{Attributes, Image, QuantizationResult};
+use imagequant::{Attributes, Histogram, Image, QuantizationResult};
 use imgref::*;
 use rgb::*;
 
@@ -91,7 +91,10 @@ pub struct Settings {
     pub fast: bool,
     /// Sets the looping method for the image sequence.
     pub repeat: Repeat,
+    /// Use a single global palette for all frames instead of per-frame palettes.
+    pub global_palette: bool,
 }
+
 
 #[derive(Copy, Clone)]
 #[non_exhaustive]
@@ -147,6 +150,7 @@ impl Default for Settings {
             quality: 100,
             fast: false,
             repeat: Repeat::Infinite,
+            global_palette: false,
         }
     }
 }
@@ -432,6 +436,11 @@ impl Writer {
     #[doc(hidden)]
     pub fn set_lossy_quality(&mut self, q: u8) {
         self.settings.giflossy_quality = q;
+    }
+
+    /// Sets whether to use a single global palette for all frames instead of per-frame palettes.
+    pub fn set_global_palette(&mut self, enabled: bool) {
+        self.settings.s.global_palette = enabled;
     }
 
     /// Adds a fixed color that will be kept in the palette at all times.
@@ -732,6 +741,14 @@ impl Writer {
     }
 
     fn quantize_frames(&self, inputs: Receiver<DiffMessage>, remap_queue: OrdQueue<RemapMessage>) -> CatResult<()> {
+        if self.settings.s.global_palette {
+            self.quantize_frames_global(inputs, remap_queue)
+        } else {
+            self.quantize_frames_local(inputs, remap_queue)
+        }
+    }
+
+    fn quantize_frames_local(&self, inputs: Receiver<DiffMessage>, remap_queue: OrdQueue<RemapMessage>) -> CatResult<()> {
         minipool::new_channel(self.settings.max_threads.min(4.try_into()?), "quant", move |quant_queue| {
         let mut inputs = inputs.into_iter();
         let next_frame = inputs.next().ok_or(Error::NoFrames)?;
@@ -815,6 +832,188 @@ impl Writer {
                 liq, remap,
                 liq_image,
                 out_buf,
+                has_next_frame,
+            })?)
+        })
+    }
+
+    fn quantize_frames_global(&self, inputs: Receiver<DiffMessage>, remap_queue: OrdQueue<RemapMessage>) -> CatResult<()> {
+        let mut inputs = inputs.into_iter();
+        let next_frame = inputs.next().ok_or(Error::NoFrames)?;
+
+        let DiffMessage { image: first_frame, .. } = &next_frame;
+        let first_frame_has_transparency = first_frame.pixels().any(|px| px.a < 128);
+
+        let mut prev_frame_keeps = false;
+        let mut frame_index = 0;
+        let mut importance_map = None;
+        let mut next_frame = Some(next_frame);
+        let mut collected = Vec::new();
+
+        while let Some(DiffMessage { image, pts, frame_duration, ordinal_frame_number, importance_map: new_importance_map }) = next_frame {
+            next_frame = inputs.next();
+
+            if importance_map.is_none() {
+                importance_map = Some(new_importance_map);
+            }
+
+            let dispose = if let Some(DiffMessage { image: next_image, .. }) = &next_frame {
+                // Skip identical frames
+                if next_image.as_ref() == image.as_ref() {
+                    continue;
+                }
+
+                // If the next frame becomes transparent, this frame has to clear to bg for it
+                if next_image.pixels().zip(image.pixels()).any(|(next, curr)| next.a < curr.a) {
+                    DisposalMethod::Background
+                } else {
+                    DisposalMethod::Keep
+                }
+            } else if first_frame_has_transparency {
+                // Last frame should reset to background to avoid breaking transparent looped anims
+                DisposalMethod::Background
+            } else {
+                // macOS preview gets Background wrong
+                DisposalMethod::Keep
+            };
+
+            let importance_map = importance_map.take().ok_or(Error::ThreadSend)?; // always set at the beginning
+
+            if !prev_frame_keeps || importance_map.iter().any(|&px| px > 0) {
+                let end_pts = if let Some(&DiffMessage { pts: next_pts, .. }) = next_frame.as_ref() {
+                    next_pts
+                } else {
+                    pts + frame_duration
+                };
+                debug_assert!(end_pts > 0.);
+
+                collected.push(QuantizeMessage {
+                    image,
+                    ordinal_frame_number, frame_index,
+                    first_frame_has_transparency,
+                    importance_map, prev_frame_keeps, dispose, end_pts,
+                    has_next_frame: next_frame.is_some(),
+                });
+
+                frame_index += 1;
+                prev_frame_keeps = dispose == DisposalMethod::Keep;
+            }
+        }
+
+        if collected.is_empty() {
+            return Err(Error::NoFrames);
+        }
+
+        let mut liq = Attributes::new();
+        if self.settings.s.fast {
+            liq.set_speed(10)?;
+        } else if self.settings.extra_effort {
+            liq.set_speed(1)?;
+        }
+        liq.set_quality(0, self.settings.s.color_quality())?;
+        if self.settings.s.quality < 50 {
+            let min_colors = 5 + self.fixed_colors.len() as u32;
+            liq.set_max_colors(u32::from(self.settings.s.quality * 2).max(min_colors).next_power_of_two().min(256))?;
+        }
+
+        let mut hist = Histogram::new(&liq);
+        let total_frames = collected.len();
+        let needs_transparency = total_frames > 1 || first_frame_has_transparency;
+        if needs_transparency {
+            hist.add_fixed_color(RGBA8::new(0, 0, 0, 0), 0.)?;
+        }
+        for color in &self.fixed_colors {
+            hist.add_fixed_color(RGBA8::new(color.r, color.g, color.b, 255), 0.)?;
+        }
+
+        struct PreparedFrame {
+            ordinal_frame_number: usize,
+            frame_index: usize,
+            end_pts: f64,
+            dispose: DisposalMethod,
+            has_next_frame: bool,
+            img: Image<'static>,
+            width: usize,
+            height: usize,
+        }
+
+        let mut prepared = Vec::with_capacity(total_frames);
+
+        for QuantizeMessage { end_pts, mut image, importance_map, ordinal_frame_number, frame_index, dispose, first_frame_has_transparency: _, prev_frame_keeps, has_next_frame } in collected {
+            if prev_frame_keeps {
+                let bg_keep_likelihood = u32::from(self.settings.s.quality.saturating_sub(80) / 4);
+                if self.settings.s.fast || (self.settings.s.quality < 100 && (frame_index % 5) >= bg_keep_likelihood) {
+                    image.pixels_mut().zip(&importance_map).filter(|&(_, &m)| m == 0).for_each(|(px, _)| *px = RGBA8::new(0, 0, 0, 0));
+                }
+            }
+
+            let (buf, width, height) = image.into_contiguous_buf();
+            let mut img = liq.new_image(buf, width, height, 0.)?;
+            if frame_index == 0 || prev_frame_keeps {
+                img.set_importance_map(&importance_map[..])?;
+            }
+            if needs_transparency {
+                img.add_fixed_color(RGBA8::new(0, 0, 0, 0))?;
+            }
+            for color in &self.fixed_colors {
+                img.add_fixed_color(RGBA8::new(color.r, color.g, color.b, 255))?;
+            }
+
+            hist.add_image(&liq, &mut img)?;
+
+            prepared.push(PreparedFrame {
+                ordinal_frame_number,
+                frame_index: frame_index as usize,
+                end_pts,
+                dispose,
+                has_next_frame,
+                img,
+                width,
+                height,
+            });
+        }
+
+        let mut res = hist.quantize(&liq)?;
+        if self.settings.extra_effort {
+            let len = res.palette_len();
+            if (len < 128 || len > 220) && len != len.next_power_of_two() {
+                liq.set_max_colors(len.next_power_of_two() as _)?;
+                liq.set_quality(0, 100)?;
+                res = hist.quantize(&liq)?;
+            }
+        }
+        res.set_dithering_level(self.settings.dithering_level())?;
+
+        #[derive(Clone)]
+        struct UnwindSafeWrap<T>(T);
+        impl<T> std::panic::UnwindSafe for UnwindSafeWrap<T> {}
+        impl<T> std::panic::RefUnwindSafe for UnwindSafeWrap<T> {}
+        impl<T: Clone> UnwindSafeWrap<T> {
+            fn get(&self) -> T {
+                self.0.clone()
+            }
+        }
+
+        let res = UnwindSafeWrap(res);
+        let liq = UnwindSafeWrap(liq);
+        minipool::new_channel(self.settings.max_threads.min(4.try_into()?), "quant", move |quant_sender| {
+            for frame in prepared {
+                quant_sender.send(frame)?;
+            }
+            Ok(())
+        }, move |PreparedFrame { ordinal_frame_number, frame_index, end_pts, dispose, has_next_frame, mut img, width, height }| {
+            let mut out = Vec::new();
+            out.try_reserve_exact(width * height).map_err(imagequant::liq_error::from)?;
+            let mut remap = res.get();
+            remap.optionally_prepare_for_dithering_with_background_set(&mut img, &mut out.spare_capacity_mut()[..width * height])?;
+            Ok(remap_queue.send(frame_index, RemapMessage {
+                ordinal_frame_number,
+                end_pts,
+                dispose,
+                liq: liq.get(),
+                remap,
+                liq_image: img,
+                out_buf: out,
                 has_next_frame,
             })?)
         })

@@ -118,13 +118,22 @@ impl<W: Write> RustEncoder<W> {
                     writer: writer.take().ok_or(crate::Error::ThreadSend)?,
                     written: self.written.clone(),
                 };
-                let mut enc = gif::Encoder::new(w, screen_width, screen_height, &[])?;
+                let global_palette = if settings.global_palette {
+                    frame.palette.as_deref().unwrap_or(&[])
+                } else {
+                    &[]
+                };
+                let mut enc = gif::Encoder::new(w, screen_width, screen_height, global_palette)?;
                 enc.write_extension(gif::ExtensionData::Repetitions(settings.repeat))?;
                 enc.write_raw_extension(gif::Extension::Comment.into(), &[b"gif.ski"])?;
                 self.gif_enc.get_or_insert(enc)
             },
             Some(ref mut enc) => enc,
         };
+
+        if settings.global_palette {
+            frame.palette = None;
+        }
 
         enc.write_lzw_pre_encoded_frame(&frame)?;
         Ok(())

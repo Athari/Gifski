@@ -149,6 +149,12 @@ GifskiError gifski_set_lossy_quality(gifski *handle, uint8_t quality);
  * Only valid immediately after calling `gifski_new`, before any frames are added. */
 GifskiError gifski_set_extra_effort(gifski *handle, bool extra);
 
+/** Switch from local frame palettes to a single global palette.
+ *
+ * Only valid immediately after calling `gifski_new`, before any frames are added. */
+GifskiError gifski_set_global_palette(gifski *handle, bool global);
+
+
 /**
  * Adds a fixed color that will be kept in the palette at all times.
  *

@@ -120,6 +120,7 @@ pub unsafe extern "C" fn gifski_new(settings: *const GifskiSettings) -> *const G
         quality: settings.quality,
         fast: settings.fast,
         repeat: if settings.repeat == -1 { Repeat::Finite(0) } else if settings.repeat == 0 { Repeat::Infinite } else { Repeat::Finite(settings.repeat as u16) },
+        global_palette: false,
     };
 
     if let Ok((collector, writer)) = crate::new(s) {
@@ -181,6 +182,21 @@ pub unsafe extern "C" fn gifski_set_extra_effort(handle: *mut GifskiHandle, extr
     if let Ok(Some(w)) = g.writer.lock().as_deref_mut() {
         #[allow(deprecated)]
         w.set_extra_effort(extra);
+        GifskiError::OK
+    } else {
+        GifskiError::INVALID_STATE
+    }
+}}
+
+/// Switch from local frame palettes to a single global palette.
+///
+/// Only valid immediately after calling `gifski_new`, before any frames are added.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gifski_set_global_palette(handle: *const GifskiHandle, global: bool) -> GifskiError { unsafe {
+    let Some(g) = borrow(handle) else { return GifskiError::NULL_ARG };
+
+    if let Ok(Some(w)) = g.writer.lock().as_deref_mut() {
+        w.set_global_palette(global);
         GifskiError::OK
     } else {
         GifskiError::INVALID_STATE
@@ -784,5 +800,21 @@ fn c_incomplete() {
         assert_eq!(GifskiError::OK, gifski_add_frame_rgba(g, 0, 1, 1, &RGBA8::new(0, 0, 0, 0), 5.0));
         assert_eq!(GifskiError::OK, gifski_add_frame_rgb(g, 1, 1, 3, 1, &RGB::new(0, 0, 0), 5.0));
         assert_eq!(GifskiError::OK, gifski_finish(g));
+    }
+}
+
+#[test]
+fn c_global_palette() {
+    let g = unsafe { gifski_new(&GifskiSettings {
+        width: 10, height: 10,
+        quality: 100,
+        fast: false,
+        repeat: 0,
+    })};
+    assert!(!g.is_null());
+    unsafe {
+        assert_eq!(GifskiError::OK, gifski_set_global_palette(g, true));
+        assert_eq!(GifskiError::OK, gifski_finish(g));
+        assert_eq!(GifskiError::NULL_ARG, gifski_set_global_palette(ptr::null(), true));
     }
 }

@@ -10,12 +10,13 @@
             },
             "args": [
                 "--output", "${workspaceFolder}/tmp/output.gif",
-                "--quality", "1",
+                "--quality", "100",
                 "--motion-quality", "100",
                 "--lossy-quality", "100",
+                "--width", "112",
+                "--height", "112",
                 "--extra",
-                "--width", "512",
-                "--height", "512",
+                "--global-palette",
                 "${workspaceFolder}/tmp/input.mov",
             ],
             "env": {

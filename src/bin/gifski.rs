@@ -161,6 +161,11 @@ fn bin_main() -> BinResult<()> {
                             .action(ArgAction::SetTrue)
                             .hide_short_help(true)
                             .help("Make animation play forwards then backwards"))
+                        .arg(Arg::new("global-palette")
+                            .long("global-palette")
+                            .num_args(0)
+                            .action(ArgAction::SetTrue)
+                            .help("Use a single global palette for all frames instead of per-frame palettes"))
                         .arg(Arg::new("fixed-color")
                             .long("fixed-color")
                             .help("Always include this color in the palette")
@@ -213,12 +218,14 @@ fn bin_main() -> BinResult<()> {
     let motion_quality = matches.get_one::<u8>("motion-quality").copied();
     let lossy_quality = matches.get_one::<u8>("lossy-quality").copied();
     let fast = matches.get_flag("fast");
+    let global_palette = matches.get_flag("global-palette");
     let settings = Settings {
         width,
         height,
         quality: matches.get_one::<u8>("quality").copied().unwrap_or(100),
         fast,
         repeat,
+        global_palette,
     };
     let quiet = matches.get_flag("quiet") || output_path == DestPath::Stdout;
     let fps: Option<f32> = matches.get_one::<f32>("fps").copied();
@@ -276,6 +283,9 @@ fn bin_main() -> BinResult<()> {
     if let Some(lossy_quality) = lossy_quality {
         #[allow(deprecated)]
         writer.set_lossy_quality(lossy_quality);
+    }
+    if global_palette {
+        writer.set_global_palette(true);
     }
 
     let (decoder_ready_send, decoder_ready_recv) = crossbeam_channel::bounded(1);
