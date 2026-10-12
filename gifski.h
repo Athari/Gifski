@@ -57,6 +57,19 @@ it will build `target/aarch64-apple-ios/release/libgifski.a` (ignore the warning
 
 */
 
+typedef struct GifskiRGB8 {
+  uint8_t r;
+  uint8_t g;
+  uint8_t b;
+} GifskiRGB8;
+
+enum GifskiEffort {
+  GIFSKI_EFFORT_DEFAULT = 0,
+  GIFSKI_EFFORT_LOW = 1,
+  GIFSKI_EFFORT_MEDIUM = 2,
+  GIFSKI_EFFORT_HIGH = 3,
+};
+
 /**
  * Settings for creating a new encoder instance. See `gifski_new`
  */
@@ -74,13 +87,39 @@ typedef struct GifskiSettings {
    */
   uint8_t quality;
   /**
-   * Lower quality, but faster encode.
+   * Quality 1-100 of temporal denoising. Lower values reduce motion. 0 defaults to `quality`.
    */
-  bool fast;
+  uint8_t motion_quality;
+  /**
+   * Quality 1-100 of gifsicle compression. Lower values add noise. 0 defaults to `quality`.
+   * Has no effect if the `gifsicle` feature hasn't been enabled.
+   */
+  uint8_t lossy_quality;
+  /**
+   * Encoding effort: 0 (default) or 2 = Medium, 1 = Low (fast), 3 = High (extra slow).
+   * See `GifskiEffort`.
+   */
+  uint8_t effort;
+  /**
+   * Use a single global palette for all frames instead of per-frame palettes.
+   */
+  bool global_palette;
   /**
    * If negative, looping is disabled. The number of times the sequence is repeated. 0 to loop forever.
    */
   int16_t repeat;
+  /**
+   * Background color for semitransparent pixels, or NULL to dither alpha.
+   */
+  const GifskiRGB8 *matte;
+  /**
+   * Array of colors to always keep in the palette, or NULL.
+   */
+  const GifskiRGB8 *fixed_colors;
+  /**
+   * Number of colors in `fixed_colors` (max 255).
+   */
+  uint32_t num_fixed_colors;
 } GifskiSettings;
 
 enum GifskiError {
@@ -132,35 +171,6 @@ typedef enum GifskiError GifskiError;
  * Returns a handle for the other functions, or `NULL` on error (if the settings are invalid).
  */
 gifski *gifski_new(const GifskiSettings *settings);
-
-
-/** Quality 1-100 of temporal denoising. Lower values reduce motion. Defaults to `settings.quality`.
- *
- * Only valid immediately after calling `gifski_new`, before any frames are added. */
-GifskiError gifski_set_motion_quality(gifski *handle, uint8_t quality);
-
-/** Quality 1-100 of gifsicle compression. Lower values add noise. Defaults to `settings.quality`.
- * Has no effect if the `gifsicle` feature hasn't been enabled.
- * Only valid immediately after calling `gifski_new`, before any frames are added. */
-GifskiError gifski_set_lossy_quality(gifski *handle, uint8_t quality);
-
-/** If `true`, encoding will be significantly slower, but may look a bit better.
- *
- * Only valid immediately after calling `gifski_new`, before any frames are added. */
-GifskiError gifski_set_extra_effort(gifski *handle, bool extra);
-
-/** Switch from local frame palettes to a single global palette.
- *
- * Only valid immediately after calling `gifski_new`, before any frames are added. */
-GifskiError gifski_set_global_palette(gifski *handle, bool global);
-
-
-/**
- * Adds a fixed color that will be kept in the palette at all times.
- *
- * Only valid immediately after calling `gifski_new`, before any frames are added.
- */
-GifskiError gifski_add_fixed_color(gifski *handle, uint8_t col_r, uint8_t col_g, uint8_t col_b);
 
 /**
  * Insert a new frame at the position of `frame_number`.

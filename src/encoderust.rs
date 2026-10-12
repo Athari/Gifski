@@ -1,5 +1,5 @@
 use crate::error::CatResult;
-use crate::{GIFFrame, Settings, SettingsExt};
+use crate::{GIFFrame, Settings};
 use rgb::RGB8;
 use std::cell::Cell;
 use std::io::Write;
@@ -47,7 +47,7 @@ impl<W: Write> RustEncoder<W> {
 impl<W: Write> RustEncoder<W> {
     #[inline(never)]
     #[cfg_attr(debug_assertions, track_caller)]
-    pub fn compress_frame(f: GIFFrame, settings: &SettingsExt) -> CatResult<gif::Frame<'static>> {
+    pub fn compress_frame(f: GIFFrame, settings: &Settings) -> CatResult<gif::Frame<'static>> {
         let GIFFrame {left, top, pal, image, dispose, transparent_index} = f;
 
         let (buffer, width, height) = image.into_contiguous_buf();

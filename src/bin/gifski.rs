@@ -11,7 +11,7 @@
 use clap::builder::NonEmptyStringValueParser;
 use clap::error::ErrorKind::MissingRequiredArgument;
 use clap::value_parser;
-use gifski::{Repeat, Settings};
+use gifski::{Effort, Repeat, Settings};
 use std::io::{BufRead, BufReader, IsTerminal, Read, StdinLock, Stdout, stdin};
 use yuv::color::MatrixCoefficients;
 
@@ -85,16 +85,25 @@ fn bin_main() -> BinResult<()> {
                             .value_parser(value_parser!(f32))
                             .value_name("x")
                             .default_value("1"))
+                        .arg(Arg::new("effort")
+                            .long("effort")
+                            .conflicts_with_all(["fast", "extra"])
+                            .num_args(1)
+                            .value_name("low|medium|high")
+                            .value_parser(parse_effort)
+                            .help("Encoding effort: low (faster), medium (default), high (slower, slightly better)"))
                         .arg(Arg::new("fast")
                             .num_args(0)
                             .action(ArgAction::SetTrue)
                             .long("fast")
+                            .hide(true)
                             .help("50% faster encoding, but 10% worse quality and larger file size"))
                         .arg(Arg::new("extra")
                             .long("extra")
                             .conflicts_with("fast")
                             .num_args(0)
                             .action(ArgAction::SetTrue)
+                            .hide(true)
                             .help("50% slower encoding, but 1% better quality and usually larger file size"))
                         .arg(Arg::new("quality")
                             .long("quality")
@@ -214,24 +223,35 @@ fn bin_main() -> BinResult<()> {
         _ => Repeat::Finite(repeat_int as u16),
     };
 
-    let extra = matches.get_flag("extra");
+    let effort = if let Some(&effort) = matches.get_one::<Effort>("effort") {
+        effort
+    } else if matches.get_flag("fast") {
+        Effort::Low
+    } else if matches.get_flag("extra") {
+        Effort::High
+    } else {
+        Effort::Medium
+    };
     let motion_quality = matches.get_one::<u8>("motion-quality").copied();
     let lossy_quality = matches.get_one::<u8>("lossy-quality").copied();
-    let fast = matches.get_flag("fast");
     let global_palette = matches.get_flag("global-palette");
+    let fixed_colors = matches.get_many::<Vec<rgb::RGB8>>("fixed-color").map_or_else(Vec::new, |c| c.flatten().copied().collect());
+    let matte = matches.get_one::<rgb::RGB8>("matte").copied();
     let settings = Settings {
         width,
         height,
         quality: matches.get_one::<u8>("quality").copied().unwrap_or(100),
-        fast,
+        motion_quality,
+        lossy_quality,
+        effort,
         repeat,
         global_palette,
+        matte,
+        fixed_colors,
     };
     let quiet = matches.get_flag("quiet") || output_path == DestPath::Stdout;
     let fps: Option<f32> = matches.get_one::<f32>("fps").copied();
     let speed: f32 = matches.get_one::<f32>("fast-forward").copied().ok_or("?")?;
-    let fixed_colors = matches.get_many::<Vec<rgb::RGB8>>("fixed-color");
-    let matte = matches.get_one::<rgb::RGB8>("matte");
     let in_color_space = matches.get_one::<MatrixCoefficients>("y4m-color-override").copied();
 
     let rate = source::Fps { fps, speed };
@@ -262,31 +282,7 @@ fn bin_main() -> BinResult<()> {
 
     std::thread::scope(move |scope| {
 
-    let (mut collector, mut writer) = gifski::new(settings)?;
-    if let Some(fixed_colors) = fixed_colors {
-        for f in fixed_colors.flatten() {
-            writer.add_fixed_color(*f);
-        }
-    }
-    if let Some(matte) = matte {
-        #[allow(deprecated)]
-        writer.set_matte_color(*matte);
-    }
-    if extra {
-        #[allow(deprecated)]
-        writer.set_extra_effort(true);
-    }
-    if let Some(motion_quality) = motion_quality {
-        #[allow(deprecated)]
-        writer.set_motion_quality(motion_quality);
-    }
-    if let Some(lossy_quality) = lossy_quality {
-        #[allow(deprecated)]
-        writer.set_lossy_quality(lossy_quality);
-    }
-    if global_palette {
-        writer.set_global_palette(true);
-    }
+    let (mut collector, writer) = gifski::new(settings.clone())?;
 
     let (decoder_ready_send, decoder_ready_recv) = crossbeam_channel::bounded(1);
 
@@ -471,6 +467,15 @@ fn parse_color_space(value: &str) -> Result<MatrixCoefficients, String> {
         _ => return Err("unsupported color space".into()),
     };
     Ok(matrix)
+}
+
+fn parse_effort(value: &str) -> Result<Effort, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "low" | "1" => Ok(Effort::Low),
+        "medium" | "2" => Ok(Effort::Medium),
+        "high" | "3" => Ok(Effort::High),
+        _ => Err("expected low, medium, or high".into()),
+    }
 }
 
 #[allow(clippy::upper_case_acronyms)]

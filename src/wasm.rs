@@ -1,4 +1,4 @@
-use crate::{Repeat, Settings};
+use crate::Settings;
 use imgref::ImgVec;
 use rgb::RGBA8;
 use std::sync::{Arc, Mutex};
@@ -23,9 +23,7 @@ impl GifskiWasm {
             width: if width > 0 { Some(width) } else { None },
             height: if height > 0 { Some(height) } else { None },
             quality,
-            fast: false,
-            repeat: Repeat::Infinite,
-            global_palette: false,
+            ..Settings::default()
         };
 
         Ok(Self {

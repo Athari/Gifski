@@ -44,7 +44,7 @@
 //! it will build `target/aarch64-apple-ios/release/libgifski.a` (ignore the warning about cdylib).
 
 use crate::progress::ProgressCallback;
-use crate::{CCallbacks, Collector, ErrorCallback, ProgressReporter, Repeat, Settings, Writer};
+use crate::{CCallbacks, Collector, Effort, ErrorCallback, ProgressReporter, Repeat, Settings, Writer};
 use imgref::{Img, ImgVec};
 use rgb::{RGB8, RGBA8};
 use std::fs;
@@ -73,10 +73,40 @@ pub struct GifskiSettings {
     pub height: u32,
     /// 1-100, but useful range is 50-100. Recommended to set to 90.
     pub quality: u8,
-    /// Lower quality, but faster encode.
-    pub fast: bool,
+    /// Quality 1-100 of temporal denoising. Lower values reduce motion. 0 defaults to `quality`.
+    pub motion_quality: u8,
+    /// Quality 1-100 of gifsicle compression. Lower values add noise. 0 defaults to `quality`.
+    pub lossy_quality: u8,
+    /// Encoding effort: 0 (default) or 2 = Medium, 1 = Low (fast), 3 = High (extra slow).
+    pub effort: u8,
+    /// Use a single global palette for all frames instead of per-frame palettes.
+    pub global_palette: bool,
     /// If negative, looping is disabled. The number of times the sequence is repeated. 0 to loop forever.
     pub repeat: i16,
+    /// Background color for semitransparent pixels, or NULL to dither alpha.
+    pub matte: *const RGB8,
+    /// Array of colors to always keep in the palette, or NULL.
+    pub fixed_colors: *const RGB8,
+    /// Number of colors in `fixed_colors` (max 255).
+    pub num_fixed_colors: u32,
+}
+
+impl Default for GifskiSettings {
+    fn default() -> Self {
+        Self {
+            width: 0,
+            height: 0,
+            quality: 90,
+            motion_quality: 0,
+            lossy_quality: 0,
+            effort: 0,
+            global_palette: false,
+            repeat: 0,
+            matte: ptr::null(),
+            fixed_colors: ptr::null(),
+            num_fixed_colors: 0,
+        }
+    }
 }
 
 #[repr(C)]
@@ -114,13 +144,31 @@ pub unsafe extern "C" fn gifski_new(settings: *const GifskiSettings) -> *const G
     let Some(settings) = settings.as_ref() else {
         return ptr::null_mut();
     };
+    let effort = match settings.effort {
+        0 | 2 => Effort::Medium,
+        1 => Effort::Low,
+        3 => Effort::High,
+        _ => return ptr::null_mut(),
+    };
+    if settings.num_fixed_colors > 0 && settings.fixed_colors.is_null() {
+        return ptr::null_mut();
+    }
+    let fixed_colors = if !settings.fixed_colors.is_null() && settings.num_fixed_colors > 0 {
+        slice::from_raw_parts(settings.fixed_colors, (settings.num_fixed_colors as usize).min(255)).to_vec()
+    } else {
+        Vec::new()
+    };
     let s = Settings {
         width: if settings.width > 0 { Some(settings.width) } else { None },
         height: if settings.height > 0 { Some(settings.height) } else { None },
         quality: settings.quality,
-        fast: settings.fast,
+        motion_quality: if settings.motion_quality > 0 { Some(settings.motion_quality) } else { None },
+        lossy_quality: if settings.lossy_quality > 0 { Some(settings.lossy_quality) } else { None },
+        effort,
         repeat: if settings.repeat == -1 { Repeat::Finite(0) } else if settings.repeat == 0 { Repeat::Infinite } else { Repeat::Finite(settings.repeat as u16) },
-        global_palette: false,
+        global_palette: settings.global_palette,
+        matte: settings.matte.as_ref().copied(),
+        fixed_colors,
     };
 
     if let Ok((collector, writer)) = crate::new(s) {
@@ -136,87 +184,6 @@ pub unsafe extern "C" fn gifski_new(settings: *const GifskiSettings) -> *const G
         .cast::<GifskiHandle>()
     } else {
         ptr::null_mut()
-    }
-}}
-
-/// Quality 1-100 of temporal denoising. Lower values reduce motion. Defaults to `settings.quality`.
-///
-/// Only valid immediately after calling `gifski_new`, before any frames are added.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn gifski_set_motion_quality(handle: *mut GifskiHandle, quality: u8) -> GifskiError { unsafe {
-    let Some(g) = borrow(handle) else { return GifskiError::NULL_ARG };
-
-    if let Ok(Some(w)) = g.writer.lock().as_deref_mut() {
-        #[allow(deprecated)]
-        w.set_motion_quality(quality);
-        GifskiError::OK
-    } else {
-        GifskiError::INVALID_STATE
-    }
-}}
-
-/// Quality 1-100 of gifsicle compression. Lower values add noise. Defaults to `settings.quality`.
-///
-/// Has no effect if the `gifsicle` feature hasn't been enabled.
-/// Only valid immediately after calling `gifski_new`, before any frames are added.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn gifski_set_lossy_quality(handle: *mut GifskiHandle, quality: u8) -> GifskiError { unsafe {
-    let Some(g) = borrow(handle) else { return GifskiError::NULL_ARG };
-
-    if let Ok(Some(w)) = g.writer.lock().as_deref_mut() {
-        #[allow(deprecated)]
-        w.set_lossy_quality(quality);
-        GifskiError::OK
-    } else {
-        GifskiError::INVALID_STATE
-    }
-}}
-
-/// If `true`, encoding will be significantly slower, but may look a bit better.
-///
-/// Only valid immediately after calling `gifski_new`, before any frames are added.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn gifski_set_extra_effort(handle: *mut GifskiHandle, extra: bool) -> GifskiError { unsafe {
-    let Some(g) = borrow(handle) else { return GifskiError::NULL_ARG };
-
-    if let Ok(Some(w)) = g.writer.lock().as_deref_mut() {
-        #[allow(deprecated)]
-        w.set_extra_effort(extra);
-        GifskiError::OK
-    } else {
-        GifskiError::INVALID_STATE
-    }
-}}
-
-/// Switch from local frame palettes to a single global palette.
-///
-/// Only valid immediately after calling `gifski_new`, before any frames are added.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn gifski_set_global_palette(handle: *const GifskiHandle, global: bool) -> GifskiError { unsafe {
-    let Some(g) = borrow(handle) else { return GifskiError::NULL_ARG };
-
-    if let Ok(Some(w)) = g.writer.lock().as_deref_mut() {
-        w.set_global_palette(global);
-        GifskiError::OK
-    } else {
-        GifskiError::INVALID_STATE
-    }
-}}
-
-/// Adds a fixed color that will be kept in the palette at all times.
-///
-/// Only valid immediately after calling `gifski_new`, before any frames are added.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn gifski_add_fixed_color(handle: *mut GifskiHandle, col_r: u8, col_g: u8, col_b: u8) -> GifskiError { unsafe {
-    let Some(g) = borrow(handle) else {
-        return GifskiError::NULL_ARG;
-    };
-
-    if let Ok(Some(w)) = g.writer.lock().as_deref_mut() {
-        w.add_fixed_color(RGB8::new(col_r, col_g, col_b));
-        GifskiError::OK
-    } else {
-        GifskiError::INVALID_STATE
     }
 }}
 
@@ -636,8 +603,8 @@ fn c_cb() {
             width: 1,
             height: 1,
             quality: 100,
-            fast: false,
             repeat: -1,
+            ..GifskiSettings::default()
         })
     };
     assert!(!g.is_null());
@@ -673,8 +640,8 @@ fn progress_abort() {
             width: 1,
             height: 1,
             quality: 100,
-            fast: false,
             repeat: -1,
+            ..GifskiSettings::default()
         })
     };
     assert!(!g.is_null());
@@ -698,8 +665,8 @@ fn cant_write_after_finish() {
     let g = unsafe { gifski_new(&GifskiSettings {
         width: 1, height: 1,
         quality: 100,
-        fast: false,
         repeat: -1,
+        ..GifskiSettings::default()
     })};
     assert!(!g.is_null());
     unsafe extern "C" fn cb(_s: usize, _buf: *const u8, u1: *mut c_void) -> c_int {
@@ -718,8 +685,8 @@ fn c_write_failure_propagated() {
     let g = unsafe { gifski_new(&GifskiSettings {
         width: 1, height: 1,
         quality: 100,
-        fast: false,
         repeat: -1,
+        ..GifskiSettings::default()
     })};
     assert!(!g.is_null());
     unsafe extern "C" fn cb(_s: usize, _buf: *const u8, _user: *mut c_void) -> c_int {
@@ -737,8 +704,8 @@ fn test_error_callback() {
     let g = unsafe { gifski_new(&GifskiSettings {
         width: 1, height: 1,
         quality: 100,
-        fast: false,
         repeat: -1,
+        ..GifskiSettings::default()
     })};
     assert!(!g.is_null());
     unsafe extern "C" fn cb(_s: usize, _buf: *const u8, u1: *mut c_void) -> c_int {
@@ -764,8 +731,8 @@ fn cant_write_twice() {
     let g = unsafe { gifski_new(&GifskiSettings {
         width: 1, height: 1,
         quality: 100,
-        fast: false,
         repeat: -1,
+        ..GifskiSettings::default()
     })};
     assert!(!g.is_null());
     unsafe extern "C" fn cb(_s: usize, _buf: *const u8, _user: *mut c_void) -> c_int {
@@ -783,8 +750,9 @@ fn c_incomplete() {
     let g = unsafe { gifski_new(&GifskiSettings {
         width: 0, height: 0,
         quality: 100,
-        fast: true,
+        effort: 1,
         repeat: 0,
+        ..GifskiSettings::default()
     })};
     assert_eq!(3, mem::size_of::<RGB8>());
 
@@ -800,21 +768,5 @@ fn c_incomplete() {
         assert_eq!(GifskiError::OK, gifski_add_frame_rgba(g, 0, 1, 1, &RGBA8::new(0, 0, 0, 0), 5.0));
         assert_eq!(GifskiError::OK, gifski_add_frame_rgb(g, 1, 1, 3, 1, &RGB::new(0, 0, 0), 5.0));
         assert_eq!(GifskiError::OK, gifski_finish(g));
-    }
-}
-
-#[test]
-fn c_global_palette() {
-    let g = unsafe { gifski_new(&GifskiSettings {
-        width: 10, height: 10,
-        quality: 100,
-        fast: false,
-        repeat: 0,
-    })};
-    assert!(!g.is_null());
-    unsafe {
-        assert_eq!(GifskiError::OK, gifski_set_global_palette(g, true));
-        assert_eq!(GifskiError::OK, gifski_finish(g));
-        assert_eq!(GifskiError::NULL_ARG, gifski_set_global_palette(ptr::null(), true));
     }
 }

@@ -78,8 +78,21 @@ pub use wasm::GifskiWasm;
 /// Number of repetitions
 pub type Repeat = gif::Repeat;
 
+/// Encoding effort level
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum Effort {
+    /// Faster encoding, slightly lower quality and larger file size
+    Low = 1,
+    /// Default balanced encoding speed and quality
+    #[default]
+    Medium = 2,
+    /// Slower encoding, slightly better quality
+    High = 3,
+}
+
 /// Encoding settings for the `new()` function
-#[derive(Copy, Clone)]
+#[derive(Clone, Debug)]
 pub struct Settings {
     /// Resize to max this width if non-0.
     pub width: Option<u32>,
@@ -87,24 +100,20 @@ pub struct Settings {
     pub height: Option<u32>,
     /// 1-100, but useful range is 50-100. Recommended to set to 100.
     pub quality: u8,
-    /// Lower quality, but faster encode.
-    pub fast: bool,
+    /// Quality 1-100 of temporal denoising. Lower values reduce motion. `None` defaults to `quality`.
+    pub motion_quality: Option<u8>,
+    /// Quality 1-100 of gifsicle compression. Lower values add noise. `None` defaults to `quality`.
+    pub lossy_quality: Option<u8>,
+    /// Encoding effort (speed vs quality trade-off).
+    pub effort: Effort,
     /// Sets the looping method for the image sequence.
     pub repeat: Repeat,
     /// Use a single global palette for all frames instead of per-frame palettes.
     pub global_palette: bool,
-}
-
-
-#[derive(Copy, Clone)]
-#[non_exhaustive]
-struct SettingsExt {
-    pub s: Settings,
-    pub max_threads: NonZeroU8,
-    pub extra_effort: bool,
-    pub motion_quality: u8,
-    pub giflossy_quality: u8,
+    /// Background color for semitransparent pixels, or `None` to dither alpha.
     pub matte: Option<RGB8>,
+    /// Colors to always keep in the palette (max 255, because one more is reserved for transparency).
+    pub fixed_colors: Vec<RGB8>,
 }
 
 impl Settings {
@@ -112,6 +121,33 @@ impl Settings {
     /// and it's better to lower quality there before ruining quantization
     pub(crate) fn color_quality(&self) -> u8 {
         (u16::from(self.quality) * 4 / 3).min(100) as u8
+    }
+
+    pub(crate) fn effective_motion_quality(&self) -> u8 {
+        self.motion_quality.unwrap_or(self.quality)
+    }
+
+    pub(crate) fn effective_lossy_quality(&self) -> u8 {
+        self.lossy_quality.unwrap_or(self.quality)
+    }
+
+    pub(crate) fn gifsicle_loss(&self) -> u32 {
+        let lossy_quality = self.effective_lossy_quality();
+        if cfg!(feature = "gifsicle") && lossy_quality < 100 {
+            ((100. / 5. - f32::from(lossy_quality) / 5.).powf(1.8).ceil() as u32 + 10) * 10
+        } else {
+            0
+        }
+    }
+
+    pub(crate) fn dithering_level(&self) -> f32 {
+        let gifsicle_quality = if cfg!(feature = "gifsicle") { self.effective_lossy_quality() } else { 100 };
+        debug_assert!(gifsicle_quality <= 100);
+        // lossy LZW adds its own dithering, so the input could be less nosiy to compensate
+        // but don't change dithering unless gifsicle quality < 90, and don't completely disable it
+        let gifsicle_factor = 0.25 + f32::from(gifsicle_quality) * (1. / 100. * 1. / 0.9 * 0.75);
+
+        f32::from(self.quality).mul_add(1. / 50. * gifsicle_factor, -1.).clamp(0.2, 1.)
     }
 
     /// `add_frame` is going to resize the images to this size.
@@ -122,35 +158,19 @@ impl Settings {
     }
 }
 
-impl SettingsExt {
-    pub(crate) fn gifsicle_loss(&self) -> u32 {
-        if cfg!(feature = "gifsicle") && self.giflossy_quality < 100 {
-            ((100. / 5. - f32::from(self.giflossy_quality) / 5.).powf(1.8).ceil() as u32 + 10) * 10
-        } else {
-            0
-        }
-    }
-
-    pub(crate) fn dithering_level(&self) -> f32 {
-        let gifsicle_quality = if cfg!(feature = "gifsicle") { self.giflossy_quality } else { 100 };
-        debug_assert!(gifsicle_quality <= 100);
-        // lossy LZW adds its own dithering, so the input could be less nosiy to compensate
-        // but don't change dithering unless gifsicle quality < 90, and don't completely disable it
-        let gifsicle_factor = 0.25 + f32::from(gifsicle_quality) * (1. / 100. * 1. / 0.9 * 0.75);
-
-        f32::from(self.s.quality).mul_add(1. / 50. * gifsicle_factor, -1.).clamp(0.2, 1.)
-    }
-}
-
 impl Default for Settings {
     #[inline]
     fn default() -> Self {
         Self {
             width: None, height: None,
             quality: 100,
-            fast: false,
+            motion_quality: None,
+            lossy_quality: None,
+            effort: Effort::Medium,
             repeat: Repeat::Infinite,
             global_palette: false,
+            matte: None,
+            fixed_colors: Vec::new(),
         }
     }
 }
@@ -159,11 +179,8 @@ impl Default for Settings {
 pub struct Writer {
     /// Input frame decoder results
     queue_iter: Option<Receiver<InputFrame>>,
-    settings: SettingsExt,
-    /// Colors the caller has specified as fixed (i.e. key colours)
-    /// This can't be in settings because that would cause it to lose Copy.
-    /// Additionally to avoid breaking C API compatibility this has to be mutable there too.
-    fixed_colors: Vec<RGB8>,
+    settings: Settings,
+    max_threads: NonZeroU8,
 }
 
 struct GIFFrame {
@@ -253,13 +270,20 @@ struct FrameMessage {
 /// Ok::<_, Error>(())
 /// ```
 #[inline]
-pub fn new(settings: Settings) -> GifResult<(Collector, Writer)> {
+pub fn new(mut settings: Settings) -> GifResult<(Collector, Writer)> {
     if settings.quality == 0 || settings.quality > 100 {
         return Err(Error::WrongSize("quality must be 1-100".into())); // I forgot to add a better error variant
+    }
+    if settings.motion_quality.is_some_and(|q| q == 0 || q > 100) {
+        return Err(Error::WrongSize("motion_quality must be 1-100".into()));
+    }
+    if settings.lossy_quality.is_some_and(|q| q == 0 || q > 100) {
+        return Err(Error::WrongSize("lossy_quality must be 1-100".into()));
     }
     if settings.width.unwrap_or(0) > 1 << 16 || settings.height.unwrap_or(0) > 1 << 16 {
         return Err(Error::WrongSize("image size too large".into()));
     }
+    settings.fixed_colors.truncate(255);
 
     let max_threads = thread::available_parallelism().map(|t| t.get().min(255) as u8).unwrap_or(8);
     let (queue, queue_iter) = crossbeam_channel::bounded(5.min(max_threads.into())); // should be sufficient for denoiser lookahead
@@ -269,15 +293,8 @@ pub fn new(settings: Settings) -> GifResult<(Collector, Writer)> {
         },
         Writer {
             queue_iter: Some(queue_iter),
-            settings: SettingsExt {
-                s: settings,
-                max_threads: max_threads.try_into()?,
-                motion_quality: settings.quality,
-                giflossy_quality: settings.quality,
-                extra_effort: false,
-                matte: None,
-            },
-            fixed_colors: Vec::new(),
+            settings,
+            max_threads: max_threads.try_into()?,
         },
     ))
 }
@@ -420,62 +437,23 @@ impl LastFrameDuration {
 
 /// Encode collected frames
 impl Writer {
-    #[deprecated(note = "please don't use, it will be in Settings eventually")]
-    #[doc(hidden)]
-    pub fn set_extra_effort(&mut self, enabled: bool) {
-        self.settings.extra_effort = enabled;
-    }
-
-    #[deprecated(note = "please don't use, it will be in Settings eventually")]
-    #[doc(hidden)]
-    pub fn set_motion_quality(&mut self, q: u8) {
-        self.settings.motion_quality = q;
-    }
-
-    #[deprecated(note = "please don't use, it will be in Settings eventually")]
-    #[doc(hidden)]
-    pub fn set_lossy_quality(&mut self, q: u8) {
-        self.settings.giflossy_quality = q;
-    }
-
-    /// Sets whether to use a single global palette for all frames instead of per-frame palettes.
-    pub fn set_global_palette(&mut self, enabled: bool) {
-        self.settings.s.global_palette = enabled;
-    }
-
-    /// Adds a fixed color that will be kept in the palette at all times.
-    ///
-    /// This may increase file size, because every frame will use a larger palette.
-    /// Max 255 allowed, because one more is reserved for transparency.
-    pub fn add_fixed_color(&mut self, col: RGB8) {
-        if self.fixed_colors.len() < 255 {
-            self.fixed_colors.push(col);
-        }
-    }
-
-    #[deprecated(note = "please don't use, it will be in Settings eventually")]
-    #[doc(hidden)]
-    pub fn set_matte_color(&mut self, col: RGB8) {
-        self.settings.matte = Some(col);
-    }
-
     /// Create and configure `imagequant::Attributes` with speed, quality, and palette limits.
     fn new_liq_attr(&self, first_frame: bool) -> CatResult<Attributes> {
         let mut liq = Attributes::new();
-        if self.settings.s.fast && !first_frame {
-            liq.set_speed(10)?;
-        } else if self.settings.extra_effort {
-            liq.set_speed(1)?;
+        match self.settings.effort {
+            Effort::Low if !first_frame => liq.set_speed(10)?,
+            Effort::High => liq.set_speed(1)?,
+            _ => {},
         }
         let quality = if !first_frame {
-            self.settings.s.color_quality()
+            self.settings.color_quality()
         } else {
             100 // the first frame is too important to ruin it
         };
         liq.set_quality(0, quality)?;
-        if self.settings.s.quality < 50 {
-            let min_colors = 5 + self.fixed_colors.len() as u32;
-            liq.set_max_colors(u32::from(self.settings.s.quality * 2).max(min_colors).next_power_of_two().min(256))?;
+        if self.settings.quality < 50 {
+            let min_colors = 5 + self.settings.fixed_colors.len() as u32;
+            liq.set_max_colors(u32::from(self.settings.quality * 2).max(min_colors).next_power_of_two().min(256))?;
         }
         Ok(liq)
     }
@@ -496,7 +474,7 @@ impl Writer {
             img.add_fixed_color(RGBA8::new(0, 0, 0, 0))?;
         }
         // user may have colors which need to be preserved and left undithered
-        for color in &self.fixed_colors {
+        for color in &self.settings.fixed_colors {
             img.add_fixed_color(RGBA8::new(color.r, color.g, color.b, 255))?;
         }
         Ok(img)
@@ -505,7 +483,7 @@ impl Writer {
     /// Requantize if needed to ensure power-of-two palette sizes when extra effort is enabled.
     fn tune_quantization_result(&self, liq: &mut Attributes, mut res: QuantizationResult, requantize: impl FnOnce(&mut Attributes) -> CatResult<QuantizationResult>) -> CatResult<QuantizationResult> {
         // GIF only stores power-of-two palette sizes
-        if self.settings.extra_effort {
+        if self.settings.effort == Effort::High {
             let len = res.palette_len();
             // it has little impact on compression (128c -> 64c is only 7% smaller)
             if (len < 128 || len > 220) && len != len.next_power_of_two() {
@@ -557,7 +535,7 @@ impl Writer {
     #[inline(never)]
     fn write_frames(&self, write_queue: Receiver<FrameMessage>, writer: &mut dyn Write, reporter: &Mutex<Option<&mut dyn ProgressReporter>>) -> CatResult<()> {
         let (lzw_queue, lzw_recv) = ordqueue_new(2);
-        minipool::new_scope((if self.settings.s.fast || self.settings.gifsicle_loss() > 0 { 3 } else { 1 }).try_into().unwrap(), "lzw", move || {
+        minipool::new_scope((if self.settings.effort == Effort::Low || self.settings.gifsicle_loss() > 0 { 3 } else { 1 }).try_into().unwrap(), "lzw", move || {
             let mut pts_in_delay_units = 0_u64;
 
             let written = Rc::new(Cell::new(0));
@@ -572,7 +550,7 @@ impl Writer {
                     .clamp(2, 30000) as u16;
                 pts_in_delay_units += u64::from(delay);
 
-                enc.write_frame(frame, delay, screen_width, screen_height, &self.settings.s)?;
+                enc.write_frame(frame, delay, screen_width, screen_height, &self.settings)?;
 
                 let mut reporter_lock = reporter.lock().map_err(|_| Error::ThreadSend)?;
                 let reporter = reporter_lock.as_deref_mut().ok_or(Error::Aborted)?;
@@ -648,7 +626,7 @@ impl Writer {
 
     /// Apply resizing and crate a blurred version for the diff/denoise phase
     fn make_resize(&self, inputs: Receiver<InputFrame>, diff_queue: OrdQueue<InputFrameResized>) -> CatResult<()> {
-        minipool::new_scope(self.settings.max_threads.min(if self.settings.s.fast || self.settings.extra_effort { 6 } else { 4 }.try_into()?), "resize", move || {
+        minipool::new_scope(self.max_threads.min(if self.settings.effort != Effort::Medium { 6 } else { 4 }.try_into()?), "resize", move || {
             Ok(())
         }, move |abort| {
             for frame in inputs {
@@ -670,8 +648,8 @@ impl Writer {
                         Img::new(image.buffer, image.width, image.height)
                     },
                 };
-                let resized = resized_binary_alpha(image, self.settings.s.width, self.settings.s.height, self.settings.matte)?;
-                let frame_blurred = if self.settings.extra_effort { smart_blur(resized.as_ref()) } else { less_smart_blur(resized.as_ref()) };
+                let resized = resized_binary_alpha(image, self.settings.width, self.settings.height, self.settings.matte)?;
+                let frame_blurred = if self.settings.effort == Effort::High { smart_blur(resized.as_ref()) } else { less_smart_blur(resized.as_ref()) };
                 diff_queue.send(frame.frame_index, InputFrameResized {
                     original_index: frame.frame_index,
                     frame: resized,
@@ -695,7 +673,7 @@ impl Writer {
             LastFrameDuration::FrameRate(0.)
         };
 
-        let mut denoiser = Denoiser::new(first_frame.frame.width(), first_frame.frame.height(), self.settings.motion_quality)?;
+        let mut denoiser = Denoiser::new(first_frame.frame.width(), first_frame.frame.height(), self.settings.effective_motion_quality())?;
 
         let mut ordinal_frame_number = 0;
         let mut next_original_index_expected = 0;
@@ -764,7 +742,7 @@ impl Writer {
     }
 
     fn quantize_frames(&self, inputs: Receiver<DiffMessage>, remap_queue: OrdQueue<RemapMessage>) -> CatResult<()> {
-        if self.settings.s.global_palette {
+        if self.settings.global_palette {
             self.quantize_frames_global(inputs, remap_queue)
         } else {
             self.quantize_frames_local(inputs, remap_queue)
@@ -846,15 +824,15 @@ impl Writer {
         if prev_frame_keeps {
             // if denoiser says the background didn't change, then believe it
             // (except higher quality settings, which try to improve it every time)
-            let bg_keep_likelihood = u32::from(self.settings.s.quality.saturating_sub(80) / 4);
-            if self.settings.s.fast || (self.settings.s.quality < 100 && (frame_index % 5) >= bg_keep_likelihood) {
+            let bg_keep_likelihood = u32::from(self.settings.quality.saturating_sub(80) / 4);
+            if self.settings.effort == Effort::Low || (self.settings.quality < 100 && (frame_index % 5) >= bg_keep_likelihood) {
                 image.pixels_mut().zip(importance_map).filter(|&(_, &m)| m == 0).for_each(|(px, _)| *px = RGBA8::new(0, 0, 0, 0));
             }
         }
     }
 
     fn quantize_frames_local(&self, inputs: Receiver<DiffMessage>, remap_queue: OrdQueue<RemapMessage>) -> CatResult<()> {
-        minipool::new_channel(self.settings.max_threads.min(4.try_into()?), "quant", move |quant_queue| {
+        minipool::new_channel(self.max_threads.min(4.try_into()?), "quant", move |quant_queue| {
             self.collect_quantize_messages(inputs, |msg| quant_queue.send(msg).map_err(From::from))
         }, move |QuantizeMessage { end_pts, mut image, importance_map, ordinal_frame_number, frame_index, dispose, first_frame_has_transparency, prev_frame_keeps, has_next_frame }| {
             self.clear_unchanged_background(&mut image, &importance_map, frame_index, prev_frame_keeps);
@@ -894,7 +872,7 @@ impl Writer {
             hist.add_fixed_color(RGBA8::new(0, 0, 0, 0), 0.)?;
         }
         // user may have colors which need to be preserved and left undithered
-        for color in &self.fixed_colors {
+        for color in &self.settings.fixed_colors {
             hist.add_fixed_color(RGBA8::new(color.r, color.g, color.b, 255), 0.)?;
         }
 
