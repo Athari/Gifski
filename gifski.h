@@ -120,6 +120,10 @@ typedef struct GifskiSettings {
    * Number of colors in `fixed_colors` (max 255).
    */
   uint32_t num_fixed_colors;
+  /**
+   * Maximum number of colors in the palette (2-256). 0 defaults to 256.
+   */
+  uint16_t max_colors;
 } GifskiSettings;
 
 enum GifskiError {

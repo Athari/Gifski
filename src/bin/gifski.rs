@@ -175,6 +175,12 @@ fn bin_main() -> BinResult<()> {
                             .num_args(0)
                             .action(ArgAction::SetTrue)
                             .help("Use a single global palette for all frames instead of per-frame palettes"))
+                        .arg(Arg::new("max-colors")
+                            .long("max-colors")
+                            .value_name("2-256")
+                            .value_parser(value_parser!(u16).range(2..=256))
+                            .num_args(1)
+                            .help("Maximum number of colors in the palette"))
                         .arg(Arg::new("fixed-color")
                             .long("fixed-color")
                             .help("Always include this color in the palette")
@@ -236,6 +242,7 @@ fn bin_main() -> BinResult<()> {
     let lossy_quality = matches.get_one::<u8>("lossy-quality").copied();
     let global_palette = matches.get_flag("global-palette");
     let fixed_colors = matches.get_many::<Vec<rgb::RGB8>>("fixed-color").map_or_else(Vec::new, |c| c.flatten().copied().collect());
+    let max_colors = matches.get_one::<u16>("max-colors").copied();
     let matte = matches.get_one::<rgb::RGB8>("matte").copied();
     let settings = Settings {
         width,
@@ -248,6 +255,7 @@ fn bin_main() -> BinResult<()> {
         global_palette,
         matte,
         fixed_colors,
+        max_colors,
     };
     let quiet = matches.get_flag("quiet") || output_path == DestPath::Stdout;
     let fps: Option<f32> = matches.get_one::<f32>("fps").copied();
@@ -264,6 +272,10 @@ fn bin_main() -> BinResult<()> {
         }
     } else if settings.quality > 100 {
         return Err("Quality 100 is maximum".into());
+    }
+
+    if !quiet && let Some(max_colors) = settings.max_colors && !max_colors.is_power_of_two() {
+        eprintln!("warning: --max-colors {max_colors} is not a power of two (GIF palette will have {} entries)", max_colors.next_power_of_two());
     }
 
     if speed > 1000.0 || speed <= 0.0 {

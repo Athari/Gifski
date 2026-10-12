@@ -28,7 +28,7 @@ fn assert_anim_eq_with_settings(
     frame_edit: Option<fn(usize, ImgRefMut<RGBA8>)>,
     max_diff: f64,
 ) {
-    let (c, w) = new(settings).unwrap();
+    let (c, w) = new(settings.clone()).unwrap();
 
     let t = std::thread::spawn(move || {
         for n in 0..num_frames {
@@ -55,6 +55,9 @@ fn assert_anim_eq_with_settings(
         let pal = decoder.global_palette().expect("Global palette should be present in header");
         assert!(!pal.is_empty(), "Global palette should not be empty");
         assert_eq!(pal.len() % 3, 0);
+        if let Some(max_colors) = settings.max_colors {
+            assert!(pal.len() / 3 <= usize::from(max_colors).next_power_of_two());
+        }
     }
 
     let mut n = 0;
@@ -62,6 +65,9 @@ fn assert_anim_eq_with_settings(
     for_each_frame(&out, |delay, frame, actual| {
         if settings.global_palette {
             assert!(frame.palette.is_none(), "Frame {frames_seen} must not have a local palette");
+        } else if let Some(max_colors) = settings.max_colors {
+            let pal = frame.palette.as_ref().expect("Local palette should be present");
+            assert!(pal.len() / 3 <= usize::from(max_colors).next_power_of_two());
         }
         frames_seen += 1;
         let next_n = delay as usize / 10;
@@ -323,5 +329,37 @@ fn global_palette_transparent() {
 #[test]
 fn global_palette_single_frame() {
     assert_global_anim_eq(1, |_| "tests/1.png".into(), None, 0.8);
+}
+
+#[test]
+fn max_colors_validation() {
+    use rgb::RGB8;
+    assert!(new(Settings { max_colors: Some(1), ..Settings::default() }).is_err());
+    assert!(new(Settings { max_colors: Some(257), ..Settings::default() }).is_err());
+    assert!(new(Settings { max_colors: Some(2), ..Settings::default() }).is_ok());
+    assert!(new(Settings { max_colors: Some(256), ..Settings::default() }).is_ok());
+    // 1 slot is reserved for transparency, so 4 fixed colors cannot fit in max_colors = 4
+    assert!(new(Settings {
+        max_colors: Some(4),
+        fixed_colors: vec![RGB8::new(1, 0, 0), RGB8::new(2, 0, 0), RGB8::new(3, 0, 0), RGB8::new(4, 0, 0)],
+        ..Settings::default()
+    }).is_err());
+    assert!(new(Settings {
+        max_colors: Some(4),
+        fixed_colors: vec![RGB8::new(1, 0, 0), RGB8::new(2, 0, 0), RGB8::new(3, 0, 0)],
+        ..Settings::default()
+    }).is_ok());
+}
+
+#[test]
+fn max_colors_encoding() {
+    assert_anim_eq_with_settings(
+        Settings { max_colors: Some(16), ..Settings::default() },
+        5, |n| format!("tests/a2/{:02}.png", 1 + n).into(), None, 15.0,
+    );
+    assert_anim_eq_with_settings(
+        Settings { max_colors: Some(16), global_palette: true, effort: gifski::Effort::High, ..Settings::default() },
+        5, |n| format!("tests/a2/{:02}.png", 1 + n).into(), None, 15.0,
+    );
 }
 

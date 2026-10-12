@@ -114,6 +114,8 @@ pub struct Settings {
     pub matte: Option<RGB8>,
     /// Colors to always keep in the palette (max 255, because one more is reserved for transparency).
     pub fixed_colors: Vec<RGB8>,
+    /// Maximum number of colors in the palette (2-256). `None` defaults to 256.
+    pub max_colors: Option<u16>,
 }
 
 impl Settings {
@@ -171,6 +173,7 @@ impl Default for Settings {
             global_palette: false,
             matte: None,
             fixed_colors: Vec::new(),
+            max_colors: None,
         }
     }
 }
@@ -270,7 +273,7 @@ struct FrameMessage {
 /// Ok::<_, Error>(())
 /// ```
 #[inline]
-pub fn new(mut settings: Settings) -> GifResult<(Collector, Writer)> {
+pub fn new(settings: Settings) -> GifResult<(Collector, Writer)> {
     if settings.quality == 0 || settings.quality > 100 {
         return Err(Error::WrongSize("quality must be 1-100".into())); // I forgot to add a better error variant
     }
@@ -280,10 +283,15 @@ pub fn new(mut settings: Settings) -> GifResult<(Collector, Writer)> {
     if settings.lossy_quality.is_some_and(|q| q == 0 || q > 100) {
         return Err(Error::WrongSize("lossy_quality must be 1-100".into()));
     }
+    if settings.max_colors.is_some_and(|c| c < 2 || c > 256) {
+        return Err(Error::WrongSize("max_colors must be 2-256".into()));
+    }
+    if settings.fixed_colors.len() >= usize::from(settings.max_colors.unwrap_or(256)) {
+        return Err(Error::WrongSize("too many fixed_colors for max_colors (1 is reserved for transparency)".into()));
+    }
     if settings.width.unwrap_or(0) > 1 << 16 || settings.height.unwrap_or(0) > 1 << 16 {
         return Err(Error::WrongSize("image size too large".into()));
     }
-    settings.fixed_colors.truncate(255);
 
     let max_threads = thread::available_parallelism().map(|t| t.get().min(255) as u8).unwrap_or(8);
     let (queue, queue_iter) = crossbeam_channel::bounded(5.min(max_threads.into())); // should be sufficient for denoiser lookahead
@@ -451,9 +459,14 @@ impl Writer {
             100 // the first frame is too important to ruin it
         };
         liq.set_quality(0, quality)?;
+        let mut max_colors = u32::from(self.settings.max_colors.unwrap_or(256));
         if self.settings.quality < 50 {
             let min_colors = 5 + self.settings.fixed_colors.len() as u32;
-            liq.set_max_colors(u32::from(self.settings.quality * 2).max(min_colors).next_power_of_two().min(256))?;
+            let quality_max_colors = u32::from(self.settings.quality * 2).max(min_colors).next_power_of_two();
+            max_colors = max_colors.min(quality_max_colors);
+        }
+        if max_colors < 256 {
+            liq.set_max_colors(max_colors)?;
         }
         Ok(liq)
     }
@@ -484,10 +497,12 @@ impl Writer {
     fn tune_quantization_result(&self, liq: &mut Attributes, mut res: QuantizationResult, requantize: impl FnOnce(&mut Attributes) -> CatResult<QuantizationResult>) -> CatResult<QuantizationResult> {
         // GIF only stores power-of-two palette sizes
         if self.settings.effort == Effort::High {
+            let max_colors = usize::from(self.settings.max_colors.unwrap_or(256));
             let len = res.palette_len();
+            let target_len = len.next_power_of_two().min(max_colors);
             // it has little impact on compression (128c -> 64c is only 7% smaller)
-            if (len < 128 || len > 220) && len != len.next_power_of_two() {
-                liq.set_max_colors(len.next_power_of_two() as _)?;
+            if (len < 128 || len > 220) && len < target_len {
+                liq.set_max_colors(target_len as _)?;
                 liq.set_quality(0, 100)?;
                 res = requantize(liq)?;
             }

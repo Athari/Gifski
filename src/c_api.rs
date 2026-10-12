@@ -89,6 +89,8 @@ pub struct GifskiSettings {
     pub fixed_colors: *const RGB8,
     /// Number of colors in `fixed_colors` (max 255).
     pub num_fixed_colors: u32,
+    /// Maximum number of colors in the palette (2-256). 0 defaults to 256.
+    pub max_colors: u16,
 }
 
 impl Default for GifskiSettings {
@@ -105,6 +107,7 @@ impl Default for GifskiSettings {
             matte: ptr::null(),
             fixed_colors: ptr::null(),
             num_fixed_colors: 0,
+            max_colors: 0,
         }
     }
 }
@@ -150,11 +153,11 @@ pub unsafe extern "C" fn gifski_new(settings: *const GifskiSettings) -> *const G
         3 => Effort::High,
         _ => return ptr::null_mut(),
     };
-    if settings.num_fixed_colors > 0 && settings.fixed_colors.is_null() {
+    if settings.num_fixed_colors > 255 || (settings.num_fixed_colors > 0 && settings.fixed_colors.is_null()) {
         return ptr::null_mut();
     }
     let fixed_colors = if !settings.fixed_colors.is_null() && settings.num_fixed_colors > 0 {
-        slice::from_raw_parts(settings.fixed_colors, (settings.num_fixed_colors as usize).min(255)).to_vec()
+        slice::from_raw_parts(settings.fixed_colors, settings.num_fixed_colors as usize).to_vec()
     } else {
         Vec::new()
     };
@@ -169,6 +172,7 @@ pub unsafe extern "C" fn gifski_new(settings: *const GifskiSettings) -> *const G
         global_palette: settings.global_palette,
         matte: settings.matte.as_ref().copied(),
         fixed_colors,
+        max_colors: if settings.max_colors > 0 { Some(settings.max_colors) } else { None },
     };
 
     if let Ok((collector, writer)) = crate::new(s) {
