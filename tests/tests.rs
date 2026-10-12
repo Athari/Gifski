@@ -11,7 +11,24 @@ fn n_frames() {
 }
 
 fn assert_anim_eq(num_frames: usize, frame_filename: fn(usize) -> PathBuf, frame_edit: Option<fn(usize, ImgRefMut<RGBA8>)>, max_diff: f64) {
-    let (c, w) = new(Settings::default()).unwrap();
+    assert_anim_eq_with_settings(Settings::default(), num_frames, frame_filename, frame_edit, max_diff);
+}
+
+fn assert_global_anim_eq(num_frames: usize, frame_filename: fn(usize) -> PathBuf, frame_edit: Option<fn(usize, ImgRefMut<RGBA8>)>, max_diff: f64) {
+    assert_anim_eq_with_settings(
+        Settings { global_palette: true, ..Settings::default() },
+        num_frames, frame_filename, frame_edit, max_diff,
+    );
+}
+
+fn assert_anim_eq_with_settings(
+    settings: Settings,
+    num_frames: usize,
+    frame_filename: fn(usize) -> PathBuf,
+    frame_edit: Option<fn(usize, ImgRefMut<RGBA8>)>,
+    max_diff: f64,
+) {
+    let (c, w) = new(settings).unwrap();
 
     let t = std::thread::spawn(move || {
         for n in 0..num_frames {
@@ -31,11 +48,21 @@ fn assert_anim_eq(num_frames: usize, frame_filename: fn(usize) -> PathBuf, frame
     w.write(&mut out, &mut progress::NoProgress {}).unwrap();
     t.join().unwrap();
 
-    // std::fs::write(format!("/tmp/anim{num_frames}{max_diff}{}.png", frame_edit.is_some()), &out);
+    if settings.global_palette {
+        let mut opts = gif::DecodeOptions::new();
+        opts.set_color_output(gif::ColorOutput::Indexed);
+        let decoder = opts.read_info(&out[..]).unwrap();
+        let pal = decoder.global_palette().expect("Global palette should be present in header");
+        assert!(!pal.is_empty(), "Global palette should not be empty");
+        assert_eq!(pal.len() % 3, 0);
+    }
 
     let mut n = 0;
     let mut frames_seen = 0;
-    for_each_frame(&out, |delay, _, actual| {
+    for_each_frame(&out, |delay, frame, actual| {
+        if settings.global_palette {
+            assert!(frame.palette.is_none(), "Frame {frames_seen} must not have a local palette");
+        }
         frames_seen += 1;
         let next_n = delay as usize / 10;
         while n < next_n {
@@ -283,114 +310,18 @@ fn dump(filename: &str, px: ImgRef<RGBA8>) {
 
 #[test]
 fn global_palette_anim2() {
-    let settings = Settings {
-        global_palette: true,
-        ..Settings::default()
-    };
-    let (c, mut w) = new(settings).unwrap();
-    w.set_global_palette(true);
-
-    let num_frames = 10;
-    let t = std::thread::spawn(move || {
-        for n in 0..num_frames {
-            let pts = n as f64 / 10.;
-            let name = format!("tests/a2/{:02}.png", 1 + n);
-            c.add_frame_png_file(n, name.into(), pts).unwrap();
-        }
-    });
-
-    let mut out = Vec::new();
-    w.write(&mut out, &mut progress::NoProgress {}).unwrap();
-    t.join().unwrap();
-
-    let mut gif_opts = gif::DecodeOptions::new();
-    gif_opts.set_color_output(gif::ColorOutput::Indexed);
-    let mut decoder = gif_opts.read_info(&out[..]).unwrap();
-
-    assert!(decoder.global_palette().is_some(), "Global palette should be present in header");
-    let global_pal = decoder.global_palette().unwrap();
-    assert!(!global_pal.is_empty(), "Global palette should not be empty");
-    assert_eq!(global_pal.len() % 3, 0);
-
-    let mut screen = gif_dispose::Screen::new_decoder(&decoder);
-    let mut frame_count = 0;
-    while let Some(frame) = decoder.read_next_frame().unwrap() {
-        assert!(frame.palette.is_none(), "Frame {} must not have a local palette", frame_count);
-        screen.blit_frame(frame).unwrap();
-
-        let expected_path = format!("tests/a2/{:02}.png", 1 + frame_count);
-        let expected = load_frame(Path::new(&expected_path));
-        assert_images_eq(expected.as_ref(), screen.pixels_rgba(), 1.5, format_args!("frame {}", frame_count));
-        frame_count += 1;
-    }
-    assert_eq!(frame_count, num_frames);
+    assert_global_anim_eq(10, |n| format!("tests/a2/{:02}.png", 1 + n).into(), None, 1.5);
 }
 
 #[test]
 fn global_palette_transparent() {
-    let settings = Settings {
-        global_palette: true,
-        ..Settings::default()
-    };
-    let (c, w) = new(settings).unwrap();
-
-    let num_frames = 10;
-    let t = std::thread::spawn(move || {
-        for n in 0..num_frames {
-            let pts = n as f64 / 10.;
-            let name = format!("tests/a2/{:02}.png", 1 + n);
-            let mut frame = load_frame(Path::new(&name));
-            frame.pixels_mut().next().unwrap().a = 0;
-            c.add_frame_rgba(n, frame, pts).unwrap();
-        }
-    });
-
-    let mut out = Vec::new();
-    w.write(&mut out, &mut progress::NoProgress {}).unwrap();
-    t.join().unwrap();
-
-    let mut gif_opts = gif::DecodeOptions::new();
-    gif_opts.set_color_output(gif::ColorOutput::Indexed);
-    let mut decoder = gif_opts.read_info(&out[..]).unwrap();
-
-    assert!(decoder.global_palette().is_some(), "Global palette should be present");
-    let mut screen = gif_dispose::Screen::new_decoder(&decoder);
-    let mut frame_count = 0;
-    while let Some(frame) = decoder.read_next_frame().unwrap() {
-        assert!(frame.palette.is_none(), "Frame {} must not have a local palette", frame_count);
-        assert!(frame.transparent.is_some(), "Frame {} should have transparent index", frame_count);
-        screen.blit_frame(frame).unwrap();
-
-        let name = format!("tests/a2/{:02}.png", 1 + frame_count);
-        let mut expected = load_frame(Path::new(&name));
-        expected.pixels_mut().next().unwrap().a = 0;
-        assert_images_eq(expected.as_ref(), screen.pixels_rgba(), 1.5, format_args!("frame {}", frame_count));
-        frame_count += 1;
-    }
-    assert_eq!(frame_count, num_frames);
+    assert_global_anim_eq(10, |n| format!("tests/a2/{:02}.png", 1 + n).into(), Some(|_, mut fr| {
+        fr.pixels_mut().next().unwrap().a = 0;
+    }), 1.5);
 }
 
 #[test]
 fn global_palette_single_frame() {
-    let settings = Settings {
-        global_palette: true,
-        ..Settings::default()
-    };
-    let (c, w) = new(settings).unwrap();
-
-    let t = std::thread::spawn(move || {
-        c.add_frame_png_file(0, "tests/1.png".into(), 0.1).unwrap();
-    });
-
-    let mut out = Vec::new();
-    w.write(&mut out, &mut progress::NoProgress {}).unwrap();
-    t.join().unwrap();
-
-    let mut gif_opts = gif::DecodeOptions::new();
-    gif_opts.set_color_output(gif::ColorOutput::Indexed);
-    let mut decoder = gif_opts.read_info(&out[..]).unwrap();
-
-    assert!(decoder.global_palette().is_some());
-    let frame = decoder.read_next_frame().unwrap().unwrap();
-    assert!(frame.palette.is_none());
+    assert_global_anim_eq(1, |_| "tests/1.png".into(), None, 0.8);
 }
+

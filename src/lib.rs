@@ -459,12 +459,8 @@ impl Writer {
         self.settings.matte = Some(col);
     }
 
-    /// `importance_map` is computed from previous and next frame.
-    /// Improves quality of pixels visible for longer.
-    /// Avoids wasting palette on pixels identical to the background.
-    ///
-    /// `background` is the previous frame.
-    fn quantize(&self, image: ImgVec<RGBA8>, importance_map: &[u8], first_frame: bool, needs_transparency: bool, prev_frame_keeps: bool) -> CatResult<(Attributes, QuantizationResult, Image<'static>, Vec<u8>)> {
+    /// Create and configure `imagequant::Attributes` with speed, quality, and palette limits.
+    fn new_liq_attr(&self, first_frame: bool) -> CatResult<Attributes> {
         let mut liq = Attributes::new();
         if self.settings.s.fast && !first_frame {
             liq.set_speed(10)?;
@@ -481,13 +477,18 @@ impl Writer {
             let min_colors = 5 + self.fixed_colors.len() as u32;
             liq.set_max_colors(u32::from(self.settings.s.quality * 2).max(min_colors).next_power_of_two().min(256))?;
         }
+        Ok(liq)
+    }
+
+    /// Create an `imagequant::Image` and attach importance map, transparency, and fixed colors.
+    fn new_liq_image(&self, liq: &Attributes, image: ImgVec<RGBA8>, importance_map: &[u8], set_importance_map: bool, needs_transparency: bool) -> CatResult<Image<'static>> {
         let (buf, width, height) = image.into_contiguous_buf();
         let mut img = liq.new_image(buf, width, height, 0.)?;
         // only later remapping tracks which area has been damaged by transparency
         // so for previous-transparent background frame the importance map may be invalid
         // because there's a transparent hole in the background not taken into account,
         // and palette may lack colors to fill that hole
-        if first_frame || prev_frame_keeps {
+        if set_importance_map {
             img.set_importance_map(importance_map)?;
         }
         // first frame may be transparent too, so it's not just for diffs
@@ -498,9 +499,11 @@ impl Writer {
         for color in &self.fixed_colors {
             img.add_fixed_color(RGBA8::new(color.r, color.g, color.b, 255))?;
         }
+        Ok(img)
+    }
 
-        let mut res = liq.quantize(&mut img)?;
-
+    /// Requantize if needed to ensure power-of-two palette sizes when extra effort is enabled.
+    fn tune_quantization_result(&self, liq: &mut Attributes, mut res: QuantizationResult, requantize: impl FnOnce(&mut Attributes) -> CatResult<QuantizationResult>) -> CatResult<QuantizationResult> {
         // GIF only stores power-of-two palette sizes
         if self.settings.extra_effort {
             let len = res.palette_len();
@@ -508,14 +511,34 @@ impl Writer {
             if (len < 128 || len > 220) && len != len.next_power_of_two() {
                 liq.set_max_colors(len.next_power_of_two() as _)?;
                 liq.set_quality(0, 100)?;
-                res = liq.quantize(&mut img)?;
+                res = requantize(liq)?;
             }
         }
         res.set_dithering_level(self.settings.dithering_level())?;
+        Ok(res)
+    }
 
+    /// Pre-reserve and prepare dithering buffer.
+    fn prepare_dither_out(&self, res: &mut QuantizationResult, img: &mut Image<'_>) -> CatResult<Vec<u8>> {
+        let (width, height) = (img.width(), img.height());
         let mut out = Vec::new();
         out.try_reserve_exact(width * height).map_err(imagequant::liq_error::from)?;
-        res.optionally_prepare_for_dithering_with_background_set(&mut img, &mut out.spare_capacity_mut()[..width * height])?;
+        res.optionally_prepare_for_dithering_with_background_set(img, &mut out.spare_capacity_mut()[..width * height])?;
+        Ok(out)
+    }
+
+    /// `importance_map` is computed from previous and next frame.
+    /// Improves quality of pixels visible for longer.
+    /// Avoids wasting palette on pixels identical to the background.
+    ///
+    /// `background` is the previous frame.
+    fn quantize(&self, image: ImgVec<RGBA8>, importance_map: &[u8], first_frame: bool, needs_transparency: bool, prev_frame_keeps: bool) -> CatResult<(Attributes, QuantizationResult, Image<'static>, Vec<u8>)> {
+        let mut liq = self.new_liq_attr(first_frame)?;
+        let mut img = self.new_liq_image(&liq, image, importance_map, first_frame || prev_frame_keeps, needs_transparency)?;
+
+        let res = liq.quantize(&mut img)?;
+        let mut res = self.tune_quantization_result(&mut liq, res, |liq| liq.quantize(&mut img).map_err(From::from))?;
+        let out = self.prepare_dither_out(&mut res, &mut img)?;
 
         Ok((liq, res, img, out))
     }
@@ -748,12 +771,16 @@ impl Writer {
         }
     }
 
-    fn quantize_frames_local(&self, inputs: Receiver<DiffMessage>, remap_queue: OrdQueue<RemapMessage>) -> CatResult<()> {
-        minipool::new_channel(self.settings.max_threads.min(4.try_into()?), "quant", move |quant_queue| {
+    /// Collect and filter frames from the diff queue for quantization.
+    ///
+    /// Determines disposal method (`Keep` vs `Background`) depending on whether the next frame
+    /// becomes transparent or if this is the last frame of a transparent looped animation.
+    /// Deduplicates identical frames and drops unchanged frames when `prev_frame_keeps`.
+    fn collect_quantize_messages(&self, inputs: Receiver<DiffMessage>, mut send: impl FnMut(QuantizeMessage) -> CatResult<()>) -> CatResult<()> {
         let mut inputs = inputs.into_iter();
         let next_frame = inputs.next().ok_or(Error::NoFrames)?;
 
-        let DiffMessage {image: first_frame, ..} = &next_frame;
+        let DiffMessage { image: first_frame, .. } = &next_frame;
         let first_frame_has_transparency = first_frame.pixels().any(|px| px.a < 128);
 
         let mut prev_frame_keeps = false;
@@ -799,7 +826,7 @@ impl Writer {
                 };
                 debug_assert!(end_pts > 0.);
 
-                quant_queue.send(QuantizeMessage {
+                send(QuantizeMessage {
                     image,
                     ordinal_frame_number, frame_index,
                     first_frame_has_transparency,
@@ -812,15 +839,25 @@ impl Writer {
             }
         }
         Ok(())
-        }, move |QuantizeMessage { end_pts, mut image, importance_map, ordinal_frame_number, frame_index, dispose, first_frame_has_transparency, prev_frame_keeps, has_next_frame }| {
-            if prev_frame_keeps {
-                // if denoiser says the background didn't change, then believe it
-                // (except higher quality settings, which try to improve it every time)
-                let bg_keep_likelihood = u32::from(self.settings.s.quality.saturating_sub(80) / 4);
-                if self.settings.s.fast || (self.settings.s.quality < 100 && (frame_index % 5) >= bg_keep_likelihood) {
-                    image.pixels_mut().zip(&importance_map).filter(|&(_, &m)| m == 0).for_each(|(px, _)| *px = RGBA8::new(0,0,0,0));
-                }
+    }
+
+    /// Clear pixels that didn't change compared to the background when the previous frame keeps its buffer.
+    fn clear_unchanged_background(&self, image: &mut ImgVec<RGBA8>, importance_map: &[u8], frame_index: u32, prev_frame_keeps: bool) {
+        if prev_frame_keeps {
+            // if denoiser says the background didn't change, then believe it
+            // (except higher quality settings, which try to improve it every time)
+            let bg_keep_likelihood = u32::from(self.settings.s.quality.saturating_sub(80) / 4);
+            if self.settings.s.fast || (self.settings.s.quality < 100 && (frame_index % 5) >= bg_keep_likelihood) {
+                image.pixels_mut().zip(importance_map).filter(|&(_, &m)| m == 0).for_each(|(px, _)| *px = RGBA8::new(0, 0, 0, 0));
             }
+        }
+    }
+
+    fn quantize_frames_local(&self, inputs: Receiver<DiffMessage>, remap_queue: OrdQueue<RemapMessage>) -> CatResult<()> {
+        minipool::new_channel(self.settings.max_threads.min(4.try_into()?), "quant", move |quant_queue| {
+            self.collect_quantize_messages(inputs, |msg| quant_queue.send(msg).map_err(From::from))
+        }, move |QuantizeMessage { end_pts, mut image, importance_map, ordinal_frame_number, frame_index, dispose, first_frame_has_transparency, prev_frame_keeps, has_next_frame }| {
+            self.clear_unchanged_background(&mut image, &importance_map, frame_index, prev_frame_keeps);
 
             let needs_transparency = frame_index > 0 || (frame_index == 0 && first_frame_has_transparency);
             let (liq, remap, liq_image, out_buf) = self.quantize(image, &importance_map, frame_index == 0, needs_transparency, prev_frame_keeps)?;
@@ -838,185 +875,61 @@ impl Writer {
     }
 
     fn quantize_frames_global(&self, inputs: Receiver<DiffMessage>, remap_queue: OrdQueue<RemapMessage>) -> CatResult<()> {
-        let mut inputs = inputs.into_iter();
-        let next_frame = inputs.next().ok_or(Error::NoFrames)?;
-
-        let DiffMessage { image: first_frame, .. } = &next_frame;
-        let first_frame_has_transparency = first_frame.pixels().any(|px| px.a < 128);
-
-        let mut prev_frame_keeps = false;
-        let mut frame_index = 0;
-        let mut importance_map = None;
-        let mut next_frame = Some(next_frame);
         let mut collected = Vec::new();
-
-        while let Some(DiffMessage { image, pts, frame_duration, ordinal_frame_number, importance_map: new_importance_map }) = next_frame {
-            next_frame = inputs.next();
-
-            if importance_map.is_none() {
-                importance_map = Some(new_importance_map);
-            }
-
-            let dispose = if let Some(DiffMessage { image: next_image, .. }) = &next_frame {
-                // Skip identical frames
-                if next_image.as_ref() == image.as_ref() {
-                    continue;
-                }
-
-                // If the next frame becomes transparent, this frame has to clear to bg for it
-                if next_image.pixels().zip(image.pixels()).any(|(next, curr)| next.a < curr.a) {
-                    DisposalMethod::Background
-                } else {
-                    DisposalMethod::Keep
-                }
-            } else if first_frame_has_transparency {
-                // Last frame should reset to background to avoid breaking transparent looped anims
-                DisposalMethod::Background
-            } else {
-                // macOS preview gets Background wrong
-                DisposalMethod::Keep
-            };
-
-            let importance_map = importance_map.take().ok_or(Error::ThreadSend)?; // always set at the beginning
-
-            if !prev_frame_keeps || importance_map.iter().any(|&px| px > 0) {
-                let end_pts = if let Some(&DiffMessage { pts: next_pts, .. }) = next_frame.as_ref() {
-                    next_pts
-                } else {
-                    pts + frame_duration
-                };
-                debug_assert!(end_pts > 0.);
-
-                collected.push(QuantizeMessage {
-                    image,
-                    ordinal_frame_number, frame_index,
-                    first_frame_has_transparency,
-                    importance_map, prev_frame_keeps, dispose, end_pts,
-                    has_next_frame: next_frame.is_some(),
-                });
-
-                frame_index += 1;
-                prev_frame_keeps = dispose == DisposalMethod::Keep;
-            }
-        }
+        self.collect_quantize_messages(inputs, |msg| {
+            collected.push(msg);
+            Ok(())
+        })?;
 
         if collected.is_empty() {
             return Err(Error::NoFrames);
         }
 
-        let mut liq = Attributes::new();
-        if self.settings.s.fast {
-            liq.set_speed(10)?;
-        } else if self.settings.extra_effort {
-            liq.set_speed(1)?;
-        }
-        liq.set_quality(0, self.settings.s.color_quality())?;
-        if self.settings.s.quality < 50 {
-            let min_colors = 5 + self.fixed_colors.len() as u32;
-            liq.set_max_colors(u32::from(self.settings.s.quality * 2).max(min_colors).next_power_of_two().min(256))?;
-        }
-
+        let mut liq = self.new_liq_attr(false)?;
         let mut hist = Histogram::new(&liq);
         let total_frames = collected.len();
-        let needs_transparency = total_frames > 1 || first_frame_has_transparency;
+        let needs_transparency = total_frames > 1 || collected[0].first_frame_has_transparency;
         if needs_transparency {
+            // first frame may be transparent too, so it's not just for diffs
             hist.add_fixed_color(RGBA8::new(0, 0, 0, 0), 0.)?;
         }
+        // user may have colors which need to be preserved and left undithered
         for color in &self.fixed_colors {
             hist.add_fixed_color(RGBA8::new(color.r, color.g, color.b, 255), 0.)?;
         }
 
-        struct PreparedFrame {
-            ordinal_frame_number: usize,
-            frame_index: usize,
-            end_pts: f64,
-            dispose: DisposalMethod,
-            has_next_frame: bool,
-            img: Image<'static>,
-            width: usize,
-            height: usize,
-        }
-
         let mut prepared = Vec::with_capacity(total_frames);
-
-        for QuantizeMessage { end_pts, mut image, importance_map, ordinal_frame_number, frame_index, dispose, first_frame_has_transparency: _, prev_frame_keeps, has_next_frame } in collected {
-            if prev_frame_keeps {
-                let bg_keep_likelihood = u32::from(self.settings.s.quality.saturating_sub(80) / 4);
-                if self.settings.s.fast || (self.settings.s.quality < 100 && (frame_index % 5) >= bg_keep_likelihood) {
-                    image.pixels_mut().zip(&importance_map).filter(|&(_, &m)| m == 0).for_each(|(px, _)| *px = RGBA8::new(0, 0, 0, 0));
-                }
-            }
-
-            let (buf, width, height) = image.into_contiguous_buf();
-            let mut img = liq.new_image(buf, width, height, 0.)?;
-            if frame_index == 0 || prev_frame_keeps {
-                img.set_importance_map(&importance_map[..])?;
-            }
-            if needs_transparency {
-                img.add_fixed_color(RGBA8::new(0, 0, 0, 0))?;
-            }
-            for color in &self.fixed_colors {
-                img.add_fixed_color(RGBA8::new(color.r, color.g, color.b, 255))?;
-            }
-
+        for mut msg in collected {
+            self.clear_unchanged_background(&mut msg.image, &msg.importance_map, msg.frame_index, msg.prev_frame_keeps);
+            // only later remapping tracks which area has been damaged by transparency
+            // so for previous-transparent background frame the importance map may be invalid
+            // because there's a transparent hole in the background not taken into account,
+            // and palette may lack colors to fill that hole
+            let set_importance_map = msg.frame_index == 0 || msg.prev_frame_keeps;
+            let mut img = self.new_liq_image(&liq, msg.image, &msg.importance_map, set_importance_map, needs_transparency)?;
             hist.add_image(&liq, &mut img)?;
-
-            prepared.push(PreparedFrame {
-                ordinal_frame_number,
-                frame_index: frame_index as usize,
-                end_pts,
-                dispose,
-                has_next_frame,
-                img,
-                width,
-                height,
-            });
+            prepared.push((msg.ordinal_frame_number, msg.frame_index, msg.end_pts, msg.dispose, msg.has_next_frame, img));
         }
 
-        let mut res = hist.quantize(&liq)?;
-        if self.settings.extra_effort {
-            let len = res.palette_len();
-            if (len < 128 || len > 220) && len != len.next_power_of_two() {
-                liq.set_max_colors(len.next_power_of_two() as _)?;
-                liq.set_quality(0, 100)?;
-                res = hist.quantize(&liq)?;
-            }
-        }
-        res.set_dithering_level(self.settings.dithering_level())?;
+        let res = hist.quantize(&liq)?;
+        let res = self.tune_quantization_result(&mut liq, res, |liq| hist.quantize(liq).map_err(From::from))?;
 
-        #[derive(Clone)]
-        struct UnwindSafeWrap<T>(T);
-        impl<T> std::panic::UnwindSafe for UnwindSafeWrap<T> {}
-        impl<T> std::panic::RefUnwindSafe for UnwindSafeWrap<T> {}
-        impl<T: Clone> UnwindSafeWrap<T> {
-            fn get(&self) -> T {
-                self.0.clone()
-            }
-        }
-
-        let res = UnwindSafeWrap(res);
-        let liq = UnwindSafeWrap(liq);
-        minipool::new_channel(self.settings.max_threads.min(4.try_into()?), "quant", move |quant_sender| {
-            for frame in prepared {
-                quant_sender.send(frame)?;
-            }
-            Ok(())
-        }, move |PreparedFrame { ordinal_frame_number, frame_index, end_pts, dispose, has_next_frame, mut img, width, height }| {
-            let mut out = Vec::new();
-            out.try_reserve_exact(width * height).map_err(imagequant::liq_error::from)?;
-            let mut remap = res.get();
-            remap.optionally_prepare_for_dithering_with_background_set(&mut img, &mut out.spare_capacity_mut()[..width * height])?;
-            Ok(remap_queue.send(frame_index, RemapMessage {
+        for (ordinal_frame_number, frame_index, end_pts, dispose, has_next_frame, mut img) in prepared {
+            let mut remap = res.clone();
+            let out = self.prepare_dither_out(&mut remap, &mut img)?;
+            remap_queue.send(frame_index as usize, RemapMessage {
                 ordinal_frame_number,
                 end_pts,
                 dispose,
-                liq: liq.get(),
+                liq: liq.clone(),
                 remap,
                 liq_image: img,
                 out_buf: out,
                 has_next_frame,
-            })?)
-        })
+            })?;
+        }
+
+        Ok(())
     }
 
     fn remap_frames(&self, mut inputs: OrdQueueIter<RemapMessage>, write_queue: Sender<FrameMessage>) -> CatResult<()> {
