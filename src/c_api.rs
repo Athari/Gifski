@@ -63,10 +63,15 @@ mod c_api_error;
 use self::c_api_error::GifskiError;
 use std::panic::catch_unwind;
 
+pub const GIFSKI_SETTINGS_MATTE: u32 = 1 << 0;
+pub const GIFSKI_SETTINGS_DITHERING_LEVEL: u32 = 1 << 1;
+
 /// Settings for creating a new encoder instance. See `gifski_new`
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct GifskiSettings {
+    /// Bitmask of optional settings (`GIFSKI_SETTINGS_*`).
+    pub mask: u32,
     /// Resize to max this width if non-0.
     pub width: u32,
     /// Resize to max this height if width is non-0. Note that aspect ratio is not preserved.
@@ -83,19 +88,22 @@ pub struct GifskiSettings {
     pub global_palette: bool,
     /// If negative, looping is disabled. The number of times the sequence is repeated. 0 to loop forever.
     pub repeat: i16,
-    /// Background color for semitransparent pixels, or NULL to dither alpha.
-    pub matte: *const RGB8,
+    /// Background color for semitransparent pixels when `GIFSKI_SETTINGS_MATTE` is set in `mask`.
+    pub matte: RGB8,
     /// Array of colors to always keep in the palette, or NULL.
     pub fixed_colors: *const RGB8,
     /// Number of colors in `fixed_colors` (max 255).
     pub num_fixed_colors: u32,
     /// Maximum number of colors in the palette (2-256). 0 defaults to 256.
     pub max_colors: u16,
+    /// Error diffusion dithering level (0.0 = none, 1.0 = full) when `GIFSKI_SETTINGS_DITHERING_LEVEL` is set in `mask`.
+    pub dithering_level: f32,
 }
 
 impl Default for GifskiSettings {
     fn default() -> Self {
         Self {
+            mask: 0,
             width: 0,
             height: 0,
             quality: 90,
@@ -104,10 +112,11 @@ impl Default for GifskiSettings {
             effort: 0,
             global_palette: false,
             repeat: 0,
-            matte: ptr::null(),
+            matte: RGB8::new(0, 0, 0),
             fixed_colors: ptr::null(),
             num_fixed_colors: 0,
             max_colors: 0,
+            dithering_level: 0.0,
         }
     }
 }
@@ -170,9 +179,10 @@ pub unsafe extern "C" fn gifski_new(settings: *const GifskiSettings) -> *const G
         effort,
         repeat: if settings.repeat == -1 { Repeat::Finite(0) } else if settings.repeat == 0 { Repeat::Infinite } else { Repeat::Finite(settings.repeat as u16) },
         global_palette: settings.global_palette,
-        matte: settings.matte.as_ref().copied(),
+        matte: if (settings.mask & GIFSKI_SETTINGS_MATTE) != 0 { Some(settings.matte) } else { None },
         fixed_colors,
         max_colors: if settings.max_colors > 0 { Some(settings.max_colors) } else { None },
+        dithering_level: if (settings.mask & GIFSKI_SETTINGS_DITHERING_LEVEL) != 0 { Some(settings.dithering_level) } else { None },
     };
 
     if let Ok((collector, writer)) = crate::new(s) {
@@ -772,5 +782,40 @@ fn c_incomplete() {
         assert_eq!(GifskiError::OK, gifski_add_frame_rgba(g, 0, 1, 1, &RGBA8::new(0, 0, 0, 0), 5.0));
         assert_eq!(GifskiError::OK, gifski_add_frame_rgb(g, 1, 1, 3, 1, &RGB::new(0, 0, 0), 5.0));
         assert_eq!(GifskiError::OK, gifski_finish(g));
+    }
+}
+
+#[test]
+fn c_settings_mask() {
+    unsafe {
+        // Out-of-range dithering_level is ignored when GIFSKI_SETTINGS_DITHERING_LEVEL is not set
+        let g = gifski_new(&GifskiSettings {
+            mask: 0,
+            quality: 90,
+            dithering_level: 2.0,
+            ..GifskiSettings::default()
+        });
+        assert!(!g.is_null());
+        let _ = gifski_finish(g);
+
+        // Out-of-range dithering_level fails when GIFSKI_SETTINGS_DITHERING_LEVEL is set
+        let g = gifski_new(&GifskiSettings {
+            mask: GIFSKI_SETTINGS_DITHERING_LEVEL,
+            quality: 90,
+            dithering_level: 2.0,
+            ..GifskiSettings::default()
+        });
+        assert!(g.is_null());
+
+        // Valid dithering_level (including 0.0), matte, and unknown mask bits succeed
+        let g = gifski_new(&GifskiSettings {
+            mask: GIFSKI_SETTINGS_MATTE | GIFSKI_SETTINGS_DITHERING_LEVEL | (1 << 31),
+            quality: 90,
+            matte: RGB8::new(255, 0, 128),
+            dithering_level: 0.0,
+            ..GifskiSettings::default()
+        });
+        assert!(!g.is_null());
+        let _ = gifski_finish(g);
     }
 }

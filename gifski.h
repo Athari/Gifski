@@ -70,10 +70,19 @@ enum GifskiEffort {
   GIFSKI_EFFORT_HIGH = 3,
 };
 
+enum GifskiSettingsMask {
+  GIFSKI_SETTINGS_MATTE = 1 << 0,
+  GIFSKI_SETTINGS_DITHERING_LEVEL = 1 << 1,
+};
+
 /**
  * Settings for creating a new encoder instance. See `gifski_new`
  */
 typedef struct GifskiSettings {
+  /**
+   * Bitmask of optional settings (`GifskiSettingsMask`).
+   */
+  uint32_t mask;
   /**
    * Resize to max this width if non-0.
    */
@@ -109,9 +118,9 @@ typedef struct GifskiSettings {
    */
   int16_t repeat;
   /**
-   * Background color for semitransparent pixels, or NULL to dither alpha.
+   * Background color for semitransparent pixels when `GIFSKI_SETTINGS_MATTE` is set in `mask`.
    */
-  const GifskiRGB8 *matte;
+  GifskiRGB8 matte;
   /**
    * Array of colors to always keep in the palette, or NULL.
    */
@@ -124,6 +133,10 @@ typedef struct GifskiSettings {
    * Maximum number of colors in the palette (2-256). 0 defaults to 256.
    */
   uint16_t max_colors;
+  /**
+   * Error diffusion dithering level (0.0 = none, 1.0 = full) when `GIFSKI_SETTINGS_DITHERING_LEVEL` is set in `mask`.
+   */
+  float dithering_level;
 } GifskiSettings;
 
 enum GifskiError {

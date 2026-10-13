@@ -116,6 +116,8 @@ pub struct Settings {
     pub fixed_colors: Vec<RGB8>,
     /// Maximum number of colors in the palette (2-256). `None` defaults to 256.
     pub max_colors: Option<u16>,
+    /// Error diffusion dithering level (0.0 = none, 1.0 = full). `None` defaults to automatic based on `quality`.
+    pub dithering_level: Option<f32>,
 }
 
 impl Settings {
@@ -142,7 +144,10 @@ impl Settings {
         }
     }
 
-    pub(crate) fn dithering_level(&self) -> f32 {
+    pub(crate) fn effective_dithering_level(&self) -> f32 {
+        if let Some(dithering_level) = self.dithering_level {
+            return dithering_level;
+        }
         let gifsicle_quality = if cfg!(feature = "gifsicle") { self.effective_lossy_quality() } else { 100 };
         debug_assert!(gifsicle_quality <= 100);
         // lossy LZW adds its own dithering, so the input could be less nosiy to compensate
@@ -174,6 +179,7 @@ impl Default for Settings {
             matte: None,
             fixed_colors: Vec::new(),
             max_colors: None,
+            dithering_level: None,
         }
     }
 }
@@ -282,6 +288,9 @@ pub fn new(settings: Settings) -> GifResult<(Collector, Writer)> {
     }
     if settings.lossy_quality.is_some_and(|q| q == 0 || q > 100) {
         return Err(Error::WrongSize("lossy_quality must be 1-100".into()));
+    }
+    if settings.dithering_level.is_some_and(|d| !(0.0..=1.0).contains(&d)) {
+        return Err(Error::WrongSize("dithering_level must be 0.0-1.0".into()));
     }
     if settings.max_colors.is_some_and(|c| c < 2 || c > 256) {
         return Err(Error::WrongSize("max_colors must be 2-256".into()));
@@ -507,7 +516,7 @@ impl Writer {
                 res = requantize(liq)?;
             }
         }
-        res.set_dithering_level(self.settings.dithering_level())?;
+        res.set_dithering_level(self.settings.effective_dithering_level())?;
         Ok(res)
     }
 

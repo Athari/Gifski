@@ -362,4 +362,26 @@ fn max_colors_encoding() {
         5, |n| format!("tests/a2/{:02}.png", 1 + n).into(), None, 15.0,
     );
 }
+
+#[test]
+fn dithering_level_validation() {
+    assert!(new(Settings { dithering_level: Some(-0.1), ..Settings::default() }).is_err());
+    assert!(new(Settings { dithering_level: Some(1.1), ..Settings::default() }).is_err());
+    assert!(new(Settings { dithering_level: Some(f32::NAN), ..Settings::default() }).is_err());
+    assert!(new(Settings { dithering_level: Some(0.0), ..Settings::default() }).is_ok());
+    assert!(new(Settings { dithering_level: Some(0.5), ..Settings::default() }).is_ok());
+    assert!(new(Settings { dithering_level: Some(1.0), ..Settings::default() }).is_ok());
+}
+
+#[test]
+fn dithering_level_encoding() {
+    assert_anim_eq_with_settings(
+        Settings { dithering_level: Some(0.0), ..Settings::default() },
+        5, |n| format!("tests/a2/{:02}.png", 1 + n).into(), None, 5.0,
+    );
+    assert_anim_eq_with_settings(
+        Settings { dithering_level: Some(1.0), ..Settings::default() },
+        5, |n| format!("tests/a2/{:02}.png", 1 + n).into(), None, 1.0,
+    );
+}
 

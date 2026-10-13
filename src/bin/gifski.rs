@@ -125,6 +125,12 @@ fn bin_main() -> BinResult<()> {
                             .value_parser(value_parser!(u8).range(1..=100))
                             .num_args(1)
                             .help("Lower values introduce noise and streaks"))
+                        .arg(Arg::new("dithering-level")
+                            .long("dithering-level")
+                            .value_name("0.0-1.0")
+                            .value_parser(parse_dithering_level)
+                            .num_args(1)
+                            .help("Error diffusion dithering level (0.0 = none, 1.0 = full)"))
                         .arg(Arg::new("width")
                             .long("width")
                             .short('W')
@@ -240,6 +246,7 @@ fn bin_main() -> BinResult<()> {
     };
     let motion_quality = matches.get_one::<u8>("motion-quality").copied();
     let lossy_quality = matches.get_one::<u8>("lossy-quality").copied();
+    let dithering_level = matches.get_one::<f32>("dithering-level").copied();
     let global_palette = matches.get_flag("global-palette");
     let fixed_colors = matches.get_many::<Vec<rgb::RGB8>>("fixed-color").map_or_else(Vec::new, |c| c.flatten().copied().collect());
     let max_colors = matches.get_one::<u16>("max-colors").copied();
@@ -256,6 +263,7 @@ fn bin_main() -> BinResult<()> {
         matte,
         fixed_colors,
         max_colors,
+        dithering_level,
     };
     let quiet = matches.get_flag("quiet") || output_path == DestPath::Stdout;
     let fps: Option<f32> = matches.get_one::<f32>("fps").copied();
@@ -487,6 +495,15 @@ fn parse_effort(value: &str) -> Result<Effort, String> {
         "medium" | "2" => Ok(Effort::Medium),
         "high" | "3" => Ok(Effort::High),
         _ => Err("expected low, medium, or high".into()),
+    }
+}
+
+fn parse_dithering_level(value: &str) -> Result<f32, String> {
+    let val: f32 = value.trim().parse().map_err(|e| format!("{e}"))?;
+    if (0.0..=1.0).contains(&val) {
+        Ok(val)
+    } else {
+        Err("dithering level must be between 0.0 and 1.0".into())
     }
 }
 
