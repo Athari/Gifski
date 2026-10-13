@@ -70,13 +70,9 @@ fn bin_main() -> BinResult<()> {
                         .arg(Arg::new("fps")
                             .long("fps")
                             .short('r')
-                            .help("Frame rate of animation. If using PNG files as \
-                                   input, this means the speed, as all frames are \
-                                   kept.\nIf video is used, it will be resampled to \
-                                   this constant rate by dropping and/or duplicating \
-                                   frames.\nDefault is 20 for videos. No effect for \
-                                   PNG input. For GIF input, it will be used to drop \
-                                   frames if present.")
+                            .help("Frame rate of animation. If using PNG files as input, this means the speed, as all frames are kept.\n\
+                                   If video is used, it will be resampled to this constant rate by dropping and/or duplicating frames.\n\
+                                   Default is 20 for videos. No effect for PNG input. For GIF input, it will be used to drop frames if present.")
                             .value_parser(value_parser!(f32))
                             .value_name("num"))
                         .arg(Arg::new("fast-forward")
@@ -118,19 +114,19 @@ fn bin_main() -> BinResult<()> {
                             .value_name("1-100")
                             .value_parser(value_parser!(u8).range(1..=100))
                             .num_args(1)
-                            .help("Lower values reduce motion"))
+                            .help("Lower values reduce motion and introduce smearing artifacts (defaults to --quality)"))
                         .arg(Arg::new("lossy-quality")
                             .long("lossy-quality")
                             .value_name("1-100")
                             .value_parser(value_parser!(u8).range(1..=100))
                             .num_args(1)
-                            .help("Lower values introduce noise and streaks"))
+                            .help("Lower values introduce noise and streaks (defaults to --quality)"))
                         .arg(Arg::new("dithering-level")
                             .long("dithering-level")
                             .value_name("0.0-1.0")
                             .value_parser(parse_dithering_level)
                             .num_args(1)
-                            .help("Error diffusion dithering level (0.0 = none, 1.0 = full)"))
+                            .help("Error diffusion dithering level (0.0 = none, 1.0 = full; by default based on --quality and --lossy-quality)"))
                         .arg(Arg::new("width")
                             .long("width")
                             .short('W')
@@ -144,7 +140,7 @@ fn bin_main() -> BinResult<()> {
                             .num_args(1)
                             .value_parser(value_parser!(u32))
                             .value_name("px")
-                            .help("Maximum height (stretches if the width is also set)"))
+                            .help("Maximum height (scales proportionally if --width is not set, stretches if --width is also set)"))
                         .arg(Arg::new("nosort")
                             .alias("nosort")
                             .long("no-sort")
@@ -186,7 +182,7 @@ fn bin_main() -> BinResult<()> {
                             .value_name("2-256")
                             .value_parser(value_parser!(u16).range(2..=256))
                             .num_args(1)
-                            .help("Maximum number of colors in the palette"))
+                            .help("Maximum number of colors in the palette (by default based on --quality)"))
                         .arg(Arg::new("fixed-color")
                             .long("fixed-color")
                             .help("Always include this color in the palette")

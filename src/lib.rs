@@ -468,12 +468,14 @@ impl Writer {
             100 // the first frame is too important to ruin it
         };
         liq.set_quality(0, quality)?;
-        let mut max_colors = u32::from(self.settings.max_colors.unwrap_or(256));
-        if self.settings.quality < 50 {
+        let max_colors = if let Some(max_colors) = self.settings.max_colors {
+            u32::from(max_colors)
+        } else if self.settings.quality < 50 {
             let min_colors = 5 + self.settings.fixed_colors.len() as u32;
-            let quality_max_colors = u32::from(self.settings.quality * 2).max(min_colors).next_power_of_two();
-            max_colors = max_colors.min(quality_max_colors);
-        }
+            u32::from(self.settings.quality * 2).max(min_colors).next_power_of_two().min(256)
+        } else {
+            256
+        };
         if max_colors < 256 {
             liq.set_max_colors(max_colors)?;
         }
@@ -916,22 +918,24 @@ impl Writer {
         let res = hist.quantize(&liq)?;
         let res = self.tune_quantization_result(&mut liq, res, |liq| hist.quantize(liq).map_err(From::from))?;
 
-        for (ordinal_frame_number, frame_index, end_pts, dispose, has_next_frame, mut img) in prepared {
-            let mut remap = res.clone();
+        minipool::new_channel(self.max_threads.min(4.try_into()?), "quant", move |quant_queue| {
+            for (ordinal_frame_number, frame_index, end_pts, dispose, has_next_frame, img) in prepared {
+                quant_queue.send((ordinal_frame_number, frame_index, end_pts, dispose, has_next_frame, img, res.clone(), liq.clone()))?;
+            }
+            Ok(())
+        }, move |(ordinal_frame_number, frame_index, end_pts, dispose, has_next_frame, mut img, mut remap, liq)| {
             let out = self.prepare_dither_out(&mut remap, &mut img)?;
-            remap_queue.send(frame_index as usize, RemapMessage {
+            Ok(remap_queue.send(frame_index as usize, RemapMessage {
                 ordinal_frame_number,
                 end_pts,
                 dispose,
-                liq: liq.clone(),
+                liq,
                 remap,
                 liq_image: img,
                 out_buf: out,
                 has_next_frame,
-            })?;
-        }
-
-        Ok(())
+            })?)
+        })
     }
 
     fn remap_frames(&self, mut inputs: OrdQueueIter<RemapMessage>, write_queue: Sender<FrameMessage>) -> CatResult<()> {

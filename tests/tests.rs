@@ -361,6 +361,26 @@ fn max_colors_encoding() {
         Settings { max_colors: Some(16), global_palette: true, effort: gifski::Effort::High, ..Settings::default() },
         5, |n| format!("tests/a2/{:02}.png", 1 + n).into(), None, 15.0,
     );
+
+    // Explicit max_colors (128) should override the quality < 50 heuristic (which would cap quality=10 at 32 colors)
+    let (c, w) = new(Settings {
+        quality: 10,
+        max_colors: Some(128),
+        ..Settings::default()
+    }).unwrap();
+    let t = std::thread::spawn(move || {
+        c.add_frame_png_file(0, "tests/1.png".into(), 0.1).unwrap();
+    });
+    let mut out = Vec::new();
+    w.write(&mut out, &mut progress::NoProgress {}).unwrap();
+    t.join().unwrap();
+
+    let mut opts = gif::DecodeOptions::new();
+    opts.set_color_output(gif::ColorOutput::Indexed);
+    let mut decoder = opts.read_info(&out[..]).unwrap();
+    let frame = decoder.read_next_frame().unwrap().unwrap();
+    let pal = frame.palette.as_ref().expect("Local palette should be present");
+    assert_eq!(pal.len() / 3, 128);
 }
 
 #[test]
