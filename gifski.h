@@ -63,17 +63,17 @@ typedef struct GifskiRGB8 {
   uint8_t b;
 } GifskiRGB8;
 
-enum GifskiEffort {
-  GIFSKI_EFFORT_DEFAULT = 0,
-  GIFSKI_EFFORT_LOW = 1,
-  GIFSKI_EFFORT_MEDIUM = 2,
-  GIFSKI_EFFORT_HIGH = 3,
-};
+typedef enum GifskiSpeed : uint8_t {
+  GIFSKI_SPEED_DEFAULT = 0,
+  GIFSKI_SPEED_SLOW = 1,
+  GIFSKI_SPEED_MEDIUM = 4,
+  GIFSKI_SPEED_FAST = 10,
+} GifskiSpeed;
 
-enum GifskiSettingsMask {
+typedef enum GifskiSettingsMask {
   GIFSKI_SETTINGS_MATTE = 1 << 0,
   GIFSKI_SETTINGS_DITHERING_LEVEL = 1 << 1,
-};
+} GifskiSettingsMask;
 
 /**
  * Settings for creating a new encoder instance. See `gifski_new`
@@ -105,10 +105,9 @@ typedef struct GifskiSettings {
    */
   uint8_t lossy_quality;
   /**
-   * Encoding effort: 0 (default) or 2 = Medium, 1 = Low (fast), 3 = High (extra slow).
-   * See `GifskiEffort`.
+   * Encoding speed: see `GifskiSpeed`. 0 (`GIFSKI_SPEED_DEFAULT`) defaults to `GIFSKI_SPEED_MEDIUM`.
    */
-  uint8_t effort;
+  GifskiSpeed speed;
   /**
    * Use a single global palette for all frames instead of per-frame palettes.
    */
@@ -139,7 +138,7 @@ typedef struct GifskiSettings {
   float dithering_level;
 } GifskiSettings;
 
-enum GifskiError {
+typedef enum GifskiError {
   GIFSKI_OK = 0,
   /** one of input arguments was NULL */
   GIFSKI_NULL_ARG,
@@ -171,14 +170,12 @@ enum GifskiError {
   GIFSKI_ABORTED,
   /** should not happen, file a bug */
   GIFSKI_OTHER,
-};
+} GifskiError;
 
 /* workaround for a wrong definition in an older version of this header. Please use GIFSKI_ABORTED directly */
 #ifndef ABORTED
 #define ABORTED GIFSKI_ABORTED
 #endif
-
-typedef enum GifskiError GifskiError;
 
 /**
  * Call to start the process

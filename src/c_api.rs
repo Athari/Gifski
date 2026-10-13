@@ -44,7 +44,7 @@
 //! it will build `target/aarch64-apple-ios/release/libgifski.a` (ignore the warning about cdylib).
 
 use crate::progress::ProgressCallback;
-use crate::{CCallbacks, Collector, Effort, ErrorCallback, ProgressReporter, Repeat, Settings, Writer};
+use crate::{CCallbacks, Collector, ErrorCallback, ProgressReporter, Repeat, Settings, Speed, Writer};
 use imgref::{Img, ImgVec};
 use rgb::{RGB8, RGBA8};
 use std::fs;
@@ -66,6 +66,17 @@ use std::panic::catch_unwind;
 pub const GIFSKI_SETTINGS_MATTE: u32 = 1 << 0;
 pub const GIFSKI_SETTINGS_DITHERING_LEVEL: u32 = 1 << 1;
 
+/// Encoding speed level
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum GifskiSpeed {
+    #[default]
+    Default = 0,
+    Slow = 1,
+    Medium = 4,
+    Fast = 10,
+}
+
 /// Settings for creating a new encoder instance. See `gifski_new`
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -82,8 +93,8 @@ pub struct GifskiSettings {
     pub motion_quality: u8,
     /// Quality 1-100 of gifsicle compression. Lower values add noise. 0 defaults to `quality`.
     pub lossy_quality: u8,
-    /// Encoding effort: 0 (default) or 2 = Medium, 1 = Low (fast), 3 = High (extra slow).
-    pub effort: u8,
+    /// Encoding speed: see `GifskiSpeed`. 0 (`GIFSKI_SPEED_DEFAULT`) defaults to `GIFSKI_SPEED_MEDIUM`.
+    pub speed: GifskiSpeed,
     /// Use a single global palette for all frames instead of per-frame palettes.
     pub global_palette: bool,
     /// If negative, looping is disabled. The number of times the sequence is repeated. 0 to loop forever.
@@ -109,7 +120,7 @@ impl Default for GifskiSettings {
             quality: 90,
             motion_quality: 0,
             lossy_quality: 0,
-            effort: 0,
+            speed: GifskiSpeed::Default,
             global_palette: false,
             repeat: 0,
             matte: RGB8::new(0, 0, 0),
@@ -156,11 +167,10 @@ pub unsafe extern "C" fn gifski_new(settings: *const GifskiSettings) -> *const G
     let Some(settings) = settings.as_ref() else {
         return ptr::null_mut();
     };
-    let effort = match settings.effort {
-        0 | 2 => Effort::Medium,
-        1 => Effort::Low,
-        3 => Effort::High,
-        _ => return ptr::null_mut(),
+    let speed = match settings.speed {
+        GifskiSpeed::Default | GifskiSpeed::Medium => Speed::MEDIUM,
+        GifskiSpeed::Slow => Speed::SLOW,
+        GifskiSpeed::Fast => Speed::FAST,
     };
     if settings.num_fixed_colors > 255 || (settings.num_fixed_colors > 0 && settings.fixed_colors.is_null()) {
         return ptr::null_mut();
@@ -176,7 +186,7 @@ pub unsafe extern "C" fn gifski_new(settings: *const GifskiSettings) -> *const G
         quality: settings.quality,
         motion_quality: if settings.motion_quality > 0 { Some(settings.motion_quality) } else { None },
         lossy_quality: if settings.lossy_quality > 0 { Some(settings.lossy_quality) } else { None },
-        effort,
+        speed,
         repeat: if settings.repeat == -1 { Repeat::Finite(0) } else if settings.repeat == 0 { Repeat::Infinite } else { Repeat::Finite(settings.repeat as u16) },
         global_palette: settings.global_palette,
         matte: if (settings.mask & GIFSKI_SETTINGS_MATTE) != 0 { Some(settings.matte) } else { None },
@@ -764,7 +774,7 @@ fn c_incomplete() {
     let g = unsafe { gifski_new(&GifskiSettings {
         width: 0, height: 0,
         quality: 100,
-        effort: 1,
+        speed: GifskiSpeed::Slow,
         repeat: 0,
         ..GifskiSettings::default()
     })};
@@ -782,6 +792,45 @@ fn c_incomplete() {
         assert_eq!(GifskiError::OK, gifski_add_frame_rgba(g, 0, 1, 1, &RGBA8::new(0, 0, 0, 0), 5.0));
         assert_eq!(GifskiError::OK, gifski_add_frame_rgb(g, 1, 1, 3, 1, &RGB::new(0, 0, 0), 5.0));
         assert_eq!(GifskiError::OK, gifski_finish(g));
+    }
+}
+
+#[test]
+fn c_settings_speed() {
+    assert_eq!(1, mem::size_of::<GifskiSpeed>());
+
+    unsafe {
+        // speed Default (0) defaults to Medium
+        let g = gifski_new(&GifskiSettings {
+            speed: GifskiSpeed::Default,
+            ..GifskiSettings::default()
+        });
+        assert!(!g.is_null());
+        let _ = gifski_finish(g);
+
+        // speed Slow (1)
+        let g = gifski_new(&GifskiSettings {
+            speed: GifskiSpeed::Slow,
+            ..GifskiSettings::default()
+        });
+        assert!(!g.is_null());
+        let _ = gifski_finish(g);
+
+        // speed Medium (4)
+        let g = gifski_new(&GifskiSettings {
+            speed: GifskiSpeed::Medium,
+            ..GifskiSettings::default()
+        });
+        assert!(!g.is_null());
+        let _ = gifski_finish(g);
+
+        // speed Fast (10)
+        let g = gifski_new(&GifskiSettings {
+            speed: GifskiSpeed::Fast,
+            ..GifskiSettings::default()
+        });
+        assert!(!g.is_null());
+        let _ = gifski_finish(g);
     }
 }
 

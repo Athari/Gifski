@@ -78,17 +78,14 @@ pub use wasm::GifskiWasm;
 /// Number of repetitions
 pub type Repeat = gif::Repeat;
 
-/// Encoding effort level
-#[repr(u8)]
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub enum Effort {
-    /// Faster encoding, slightly lower quality and larger file size
-    Low = 1,
-    /// Default balanced encoding speed and quality
-    #[default]
-    Medium = 2,
-    /// Slower encoding, slightly better quality
-    High = 3,
+/// Encoding speed level (1-10)
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Speed(pub u8);
+
+impl Speed {
+    pub const SLOW: Self = Self(1);
+    pub const MEDIUM: Self = Self(4);
+    pub const FAST: Self = Self(10);
 }
 
 /// Encoding settings for the `new()` function
@@ -104,8 +101,8 @@ pub struct Settings {
     pub motion_quality: Option<u8>,
     /// Quality 1-100 of gifsicle compression. Lower values add noise. `None` defaults to `quality`.
     pub lossy_quality: Option<u8>,
-    /// Encoding effort (speed vs quality trade-off).
-    pub effort: Effort,
+    /// Encoding speed: Speed::SLOW, Speed::MEDIUM, Speed::FAST, or Speed(1-10). Defaults to Speed::MEDIUM.
+    pub speed: Speed,
     /// Sets the looping method for the image sequence.
     pub repeat: Repeat,
     /// Use a single global palette for all frames instead of per-frame palettes.
@@ -157,6 +154,20 @@ impl Settings {
         f32::from(self.quality).mul_add(1. / 50. * gifsicle_factor, -1.).clamp(0.2, 1.)
     }
 
+    /// Returns true if encoding speed is fast (speed >= 10).
+    #[must_use]
+    #[inline]
+    pub fn fast(&self) -> bool {
+        self.speed.0 >= 10
+    }
+
+    /// Returns true if encoding speed is slow (speed <= 1).
+    #[must_use]
+    #[inline]
+    pub fn slow(&self) -> bool {
+        self.speed.0 <= 1
+    }
+
     /// `add_frame` is going to resize the images to this size.
     #[must_use]
     #[inline]
@@ -173,7 +184,7 @@ impl Default for Settings {
             quality: 100,
             motion_quality: None,
             lossy_quality: None,
-            effort: Effort::Medium,
+            speed: Speed::MEDIUM,
             repeat: Repeat::Infinite,
             global_palette: false,
             matte: None,
@@ -288,6 +299,9 @@ pub fn new(settings: Settings) -> GifResult<(Collector, Writer)> {
     }
     if settings.lossy_quality.is_some_and(|q| q == 0 || q > 100) {
         return Err(Error::WrongSize("lossy_quality must be 1-100".into()));
+    }
+    if !(1..=10).contains(&settings.speed.0) {
+        return Err(Error::WrongSize("speed must be 1-10".into()));
     }
     if settings.dithering_level.is_some_and(|d| !(0.0..=1.0).contains(&d)) {
         return Err(Error::WrongSize("dithering_level must be 0.0-1.0".into()));
@@ -457,11 +471,12 @@ impl Writer {
     /// Create and configure `imagequant::Attributes` with speed, quality, and palette limits.
     fn new_liq_attr(&self, first_frame: bool) -> CatResult<Attributes> {
         let mut liq = Attributes::new();
-        match self.settings.effort {
-            Effort::Low if !first_frame => liq.set_speed(10)?,
-            Effort::High => liq.set_speed(1)?,
-            _ => {},
-        }
+        let speed = if first_frame {
+            self.settings.speed.0.min(4)
+        } else {
+            self.settings.speed.0
+        };
+        liq.set_speed(i32::from(speed))?;
         let quality = if !first_frame {
             self.settings.color_quality()
         } else {
@@ -504,10 +519,10 @@ impl Writer {
         Ok(img)
     }
 
-    /// Requantize if needed to ensure power-of-two palette sizes when extra effort is enabled.
+    /// Requantize if needed to ensure power-of-two palette sizes when slow speed is enabled.
     fn tune_quantization_result(&self, liq: &mut Attributes, mut res: QuantizationResult, requantize: impl FnOnce(&mut Attributes) -> CatResult<QuantizationResult>) -> CatResult<QuantizationResult> {
         // GIF only stores power-of-two palette sizes
-        if self.settings.effort == Effort::High {
+        if self.settings.slow() {
             let max_colors = usize::from(self.settings.max_colors.unwrap_or(256));
             let len = res.palette_len();
             let target_len = len.next_power_of_two().min(max_colors);
@@ -561,7 +576,7 @@ impl Writer {
     #[inline(never)]
     fn write_frames(&self, write_queue: Receiver<FrameMessage>, writer: &mut dyn Write, reporter: &Mutex<Option<&mut dyn ProgressReporter>>) -> CatResult<()> {
         let (lzw_queue, lzw_recv) = ordqueue_new(2);
-        minipool::new_scope((if self.settings.effort == Effort::Low || self.settings.gifsicle_loss() > 0 { 3 } else { 1 }).try_into().unwrap(), "lzw", move || {
+        minipool::new_scope((if self.settings.fast() || self.settings.gifsicle_loss() > 0 { 3 } else { 1 }).try_into().unwrap(), "lzw", move || {
             let mut pts_in_delay_units = 0_u64;
 
             let written = Rc::new(Cell::new(0));
@@ -652,7 +667,7 @@ impl Writer {
 
     /// Apply resizing and crate a blurred version for the diff/denoise phase
     fn make_resize(&self, inputs: Receiver<InputFrame>, diff_queue: OrdQueue<InputFrameResized>) -> CatResult<()> {
-        minipool::new_scope(self.max_threads.min(if self.settings.effort != Effort::Medium { 6 } else { 4 }.try_into()?), "resize", move || {
+        minipool::new_scope(self.max_threads.min(if self.settings.speed != Speed::MEDIUM { 6 } else { 4 }.try_into()?), "resize", move || {
             Ok(())
         }, move |abort| {
             for frame in inputs {
@@ -675,7 +690,7 @@ impl Writer {
                     },
                 };
                 let resized = resized_binary_alpha(image, self.settings.width, self.settings.height, self.settings.matte)?;
-                let frame_blurred = if self.settings.effort == Effort::High { smart_blur(resized.as_ref()) } else { less_smart_blur(resized.as_ref()) };
+                let frame_blurred = if self.settings.slow() { smart_blur(resized.as_ref()) } else { less_smart_blur(resized.as_ref()) };
                 diff_queue.send(frame.frame_index, InputFrameResized {
                     original_index: frame.frame_index,
                     frame: resized,
@@ -851,7 +866,7 @@ impl Writer {
             // if denoiser says the background didn't change, then believe it
             // (except higher quality settings, which try to improve it every time)
             let bg_keep_likelihood = u32::from(self.settings.quality.saturating_sub(80) / 4);
-            if self.settings.effort == Effort::Low || (self.settings.quality < 100 && (frame_index % 5) >= bg_keep_likelihood) {
+            if self.settings.fast() || (self.settings.quality < 100 && (frame_index % 5) >= bg_keep_likelihood) {
                 image.pixels_mut().zip(importance_map).filter(|&(_, &m)| m == 0).for_each(|(px, _)| *px = RGBA8::new(0, 0, 0, 0));
             }
         }

@@ -358,7 +358,7 @@ fn max_colors_encoding() {
         5, |n| format!("tests/a2/{:02}.png", 1 + n).into(), None, 15.0,
     );
     assert_anim_eq_with_settings(
-        Settings { max_colors: Some(16), global_palette: true, effort: gifski::Effort::High, ..Settings::default() },
+        Settings { max_colors: Some(16), global_palette: true, speed: gifski::Speed::SLOW, ..Settings::default() },
         5, |n| format!("tests/a2/{:02}.png", 1 + n).into(), None, 15.0,
     );
 
@@ -402,6 +402,38 @@ fn dithering_level_encoding() {
     assert_anim_eq_with_settings(
         Settings { dithering_level: Some(1.0), ..Settings::default() },
         5, |n| format!("tests/a2/{:02}.png", 1 + n).into(), None, 1.0,
+    );
+}
+
+#[test]
+fn speed_validation() {
+    use gifski::Speed;
+    assert_eq!(Speed::SLOW.0, 1);
+    assert_eq!(Speed::MEDIUM.0, 4);
+    assert_eq!(Speed::FAST.0, 10);
+    assert_eq!(Speed(5).0, 5);
+
+    assert!(new(Settings { speed: Speed(0), ..Settings::default() }).is_err());
+    assert!(new(Settings { speed: Speed(11), ..Settings::default() }).is_err());
+    assert!(new(Settings { speed: Speed::SLOW, ..Settings::default() }).is_ok());
+    assert!(new(Settings { speed: Speed::MEDIUM, ..Settings::default() }).is_ok());
+    assert!(new(Settings { speed: Speed::FAST, ..Settings::default() }).is_ok());
+    assert!(new(Settings { speed: Speed(5), ..Settings::default() }).is_ok());
+}
+
+#[test]
+fn speed_encoding() {
+    assert_anim_eq_with_settings(
+        Settings { speed: gifski::Speed::SLOW, ..Settings::default() },
+        5, |n| format!("tests/a2/{:02}.png", 1 + n).into(), None, 15.0,
+    );
+    assert_anim_eq_with_settings(
+        Settings { speed: gifski::Speed::FAST, ..Settings::default() },
+        5, |n| format!("tests/a2/{:02}.png", 1 + n).into(), None, 15.0,
+    );
+    assert_anim_eq_with_settings(
+        Settings { speed: gifski::Speed(5), ..Settings::default() },
+        5, |n| format!("tests/a2/{:02}.png", 1 + n).into(), None, 15.0,
     );
 }
 

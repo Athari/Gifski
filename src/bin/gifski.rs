@@ -11,7 +11,7 @@
 use clap::builder::NonEmptyStringValueParser;
 use clap::error::ErrorKind::MissingRequiredArgument;
 use clap::value_parser;
-use gifski::{Effort, Repeat, Settings};
+use gifski::{Repeat, Settings, Speed};
 use std::io::{BufRead, BufReader, IsTerminal, Read, StdinLock, Stdout, stdin};
 use yuv::color::MatrixCoefficients;
 
@@ -81,13 +81,14 @@ fn bin_main() -> BinResult<()> {
                             .value_parser(value_parser!(f32))
                             .value_name("x")
                             .default_value("1"))
-                        .arg(Arg::new("effort")
-                            .long("effort")
+                        .arg(Arg::new("speed")
+                            .long("speed")
+                            .short('s')
                             .conflicts_with_all(["fast", "extra"])
                             .num_args(1)
-                            .value_name("low|medium|high")
-                            .value_parser(parse_effort)
-                            .help("Encoding effort: low (faster), medium (default), high (slower, slightly better)"))
+                            .value_name("1-10")
+                            .value_parser(parse_speed)
+                            .help("Encoding speed: 1 (slower, slightly better) to 10 (faster, larger file; or slow|medium|fast; defaults to 4)"))
                         .arg(Arg::new("fast")
                             .num_args(0)
                             .action(ArgAction::SetTrue)
@@ -231,14 +232,14 @@ fn bin_main() -> BinResult<()> {
         _ => Repeat::Finite(repeat_int as u16),
     };
 
-    let effort = if let Some(&effort) = matches.get_one::<Effort>("effort") {
-        effort
+    let speed = if let Some(&speed) = matches.get_one::<Speed>("speed") {
+        speed
     } else if matches.get_flag("fast") {
-        Effort::Low
+        Speed::FAST
     } else if matches.get_flag("extra") {
-        Effort::High
+        Speed::SLOW
     } else {
-        Effort::Medium
+        Speed::MEDIUM
     };
     let motion_quality = matches.get_one::<u8>("motion-quality").copied();
     let lossy_quality = matches.get_one::<u8>("lossy-quality").copied();
@@ -253,7 +254,7 @@ fn bin_main() -> BinResult<()> {
         quality: matches.get_one::<u8>("quality").copied().unwrap_or(100),
         motion_quality,
         lossy_quality,
-        effort,
+        speed,
         repeat,
         global_palette,
         matte,
@@ -485,12 +486,16 @@ fn parse_color_space(value: &str) -> Result<MatrixCoefficients, String> {
     Ok(matrix)
 }
 
-fn parse_effort(value: &str) -> Result<Effort, String> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "low" | "1" => Ok(Effort::Low),
-        "medium" | "2" => Ok(Effort::Medium),
-        "high" | "3" => Ok(Effort::High),
-        _ => Err("expected low, medium, or high".into()),
+fn parse_speed(value: &str) -> Result<Speed, String> {
+    let trimmed = value.trim();
+    match trimmed.to_ascii_lowercase().as_str() {
+        "slow" => Ok(Speed::SLOW),
+        "medium" => Ok(Speed::MEDIUM),
+        "fast" => Ok(Speed::FAST),
+        _ => match trimmed.parse::<u8>() {
+            Ok(val @ 1..=10) => Ok(Speed(val)),
+            _ => Err("speed must be between 1 and 10, or slow, medium, fast".into()),
+        },
     }
 }
 
