@@ -109,6 +109,8 @@ pub struct GifskiSettings {
     pub max_colors: u16,
     /// Error diffusion dithering level (0.0 = none, 1.0 = full) when `GIFSKI_SETTINGS_DITHERING_LEVEL` is set in `mask`.
     pub dithering_level: f32,
+    /// Maximum number of pixels before auto-downscaling triggers (0 = no limit, keeps original resolution).
+    pub max_pixels: u32,
 }
 
 impl Default for GifskiSettings {
@@ -128,6 +130,7 @@ impl Default for GifskiSettings {
             num_fixed_colors: 0,
             max_colors: 0,
             dithering_level: 0.0,
+            max_pixels: 0,
         }
     }
 }
@@ -175,6 +178,9 @@ pub unsafe extern "C" fn gifski_new(settings: *const GifskiSettings) -> *const G
     if settings.num_fixed_colors > 255 || (settings.num_fixed_colors > 0 && settings.fixed_colors.is_null()) {
         return ptr::null_mut();
     }
+    if settings.max_pixels > 0 && (settings.width > 0 || settings.height > 0) {
+        return ptr::null_mut();
+    }
     let fixed_colors = if !settings.fixed_colors.is_null() && settings.num_fixed_colors > 0 {
         slice::from_raw_parts(settings.fixed_colors, settings.num_fixed_colors as usize).to_vec()
     } else {
@@ -193,6 +199,7 @@ pub unsafe extern "C" fn gifski_new(settings: *const GifskiSettings) -> *const G
         fixed_colors,
         max_colors: if settings.max_colors > 0 { Some(settings.max_colors) } else { None },
         dithering_level: if (settings.mask & GIFSKI_SETTINGS_DITHERING_LEVEL) != 0 { Some(settings.dithering_level) } else { None },
+        max_pixels: if settings.max_pixels > 0 { Some(settings.max_pixels) } else { None },
     };
 
     if let Ok((collector, writer)) = crate::new(s) {
@@ -866,5 +873,34 @@ fn c_settings_mask() {
         });
         assert!(!g.is_null());
         let _ = gifski_finish(g);
+    }
+}
+
+#[test]
+fn c_settings_max_pixels() {
+    unsafe {
+        // max_pixels > 0 succeeds
+        let g = gifski_new(&GifskiSettings {
+            max_pixels: 480_000,
+            ..GifskiSettings::default()
+        });
+        assert!(!g.is_null());
+        let _ = gifski_finish(g);
+
+        // max_pixels with width fails
+        let g = gifski_new(&GifskiSettings {
+            max_pixels: 480_000,
+            width: 800,
+            ..GifskiSettings::default()
+        });
+        assert!(g.is_null());
+
+        // max_pixels with height fails
+        let g = gifski_new(&GifskiSettings {
+            max_pixels: 480_000,
+            height: 600,
+            ..GifskiSettings::default()
+        });
+        assert!(g.is_null());
     }
 }

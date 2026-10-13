@@ -115,6 +115,8 @@ pub struct Settings {
     pub max_colors: Option<u16>,
     /// Error diffusion dithering level (0.0 = none, 1.0 = full). `None` defaults to automatic based on `quality`.
     pub dithering_level: Option<f32>,
+    /// Maximum number of pixels before auto-downscaling triggers. `None` disables downscaling (keeps original resolution).
+    pub max_pixels: Option<u32>,
 }
 
 impl Settings {
@@ -172,7 +174,7 @@ impl Settings {
     #[must_use]
     #[inline]
     pub fn dimensions_for_image(&self, width: usize, height: usize) -> (usize, usize) {
-        dimensions_for_image((width, height), (self.width, self.height))
+        dimensions_for_image((width, height), (self.width, self.height), self.max_pixels)
     }
 }
 
@@ -191,6 +193,7 @@ impl Default for Settings {
             fixed_colors: Vec::new(),
             max_colors: None,
             dithering_level: None,
+            max_pixels: None,
         }
     }
 }
@@ -315,6 +318,12 @@ pub fn new(settings: Settings) -> GifResult<(Collector, Writer)> {
     if settings.width.unwrap_or(0) > 1 << 16 || settings.height.unwrap_or(0) > 1 << 16 {
         return Err(Error::WrongSize("image size too large".into()));
     }
+    if settings.max_pixels.is_some_and(|p| p == 0) {
+        return Err(Error::WrongSize("max_pixels must be greater than 0".into()));
+    }
+    if settings.max_pixels.is_some() && (settings.width.is_some() || settings.height.is_some()) {
+        return Err(Error::WrongSize("max_pixels cannot be used together with width or height".into()));
+    }
 
     let max_threads = thread::available_parallelism().map(|t| t.get().min(255) as u8).unwrap_or(8);
     let (queue, queue_iter) = crossbeam_channel::bounded(5.min(max_threads.into())); // should be sufficient for denoiser lookahead
@@ -332,8 +341,8 @@ pub fn new(settings: Settings) -> GifResult<(Collector, Writer)> {
 
 #[inline(never)]
 #[cfg_attr(debug_assertions, track_caller)]
-fn resized_binary_alpha(image: ImgVec<RGBA8>, width: Option<u32>, height: Option<u32>, matte: Option<RGB8>) -> CatResult<ImgVec<RGBA8>> {
-    let (width, height) = dimensions_for_image((image.width(), image.height()), (width, height));
+fn resized_binary_alpha(image: ImgVec<RGBA8>, width: Option<u32>, height: Option<u32>, max_pixels: Option<u32>, matte: Option<RGB8>) -> CatResult<ImgVec<RGBA8>> {
+    let (width, height) = dimensions_for_image((image.width(), image.height()), (width, height), max_pixels);
 
     let mut image = if width != image.width() || height != image.height() {
         let tmp = image.as_ref();
@@ -417,14 +426,19 @@ fn dither_image(mut image: ImgRefMut<RGBA8>) {
 }
 
 /// `add_frame` is going to resize the image to this size.
-/// The `Option` args are user-specified max width and max height
+/// The `Option` args are user-specified max width, max height, and max pixels
 #[inline(never)]
-fn dimensions_for_image((img_w, img_h): (usize, usize), resize_to: (Option<u32>, Option<u32>)) -> (usize, usize) {
+fn dimensions_for_image((img_w, img_h): (usize, usize), resize_to: (Option<u32>, Option<u32>), max_pixels: Option<u32>) -> (usize, usize) {
     match resize_to {
         (None, None) => {
-            let factor = ((img_w * img_h + 800 * 600 / 2) as f64 / f64::from(800 * 600)).sqrt().round() as usize;
-            if factor > 1 {
-                (img_w / factor, img_h / factor)
+            if let Some(max_pixels) = max_pixels {
+                let max_px = max_pixels as usize;
+                let factor = ((img_w * img_h + max_px / 2) as f64 / max_px as f64).sqrt().round() as usize;
+                if factor > 1 {
+                    (img_w / factor, img_h / factor)
+                } else {
+                    (img_w, img_h)
+                }
             } else {
                 (img_w, img_h)
             }
@@ -689,7 +703,7 @@ impl Writer {
                         Img::new(image.buffer, image.width, image.height)
                     },
                 };
-                let resized = resized_binary_alpha(image, self.settings.width, self.settings.height, self.settings.matte)?;
+                let resized = resized_binary_alpha(image, self.settings.width, self.settings.height, self.settings.max_pixels, self.settings.matte)?;
                 let frame_blurred = if self.settings.slow() { smart_blur(resized.as_ref()) } else { less_smart_blur(resized.as_ref()) };
                 diff_queue.send(frame.frame_index, InputFrameResized {
                     original_index: frame.frame_index,

@@ -136,6 +136,10 @@ typedef struct GifskiSettings {
    * Error diffusion dithering level (0.0 = none, 1.0 = full) when `GIFSKI_SETTINGS_DITHERING_LEVEL` is set in `mask`.
    */
   float dithering_level;
+  /**
+   * Maximum number of pixels before auto-downscaling triggers (0 = no limit, keeps original resolution).
+   */
+  uint32_t max_pixels;
 } GifskiSettings;
 
 typedef enum GifskiError {

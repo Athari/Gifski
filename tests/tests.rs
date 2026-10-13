@@ -436,4 +436,32 @@ fn speed_encoding() {
         5, |n| format!("tests/a2/{:02}.png", 1 + n).into(), None, 15.0,
     );
 }
+
+#[test]
+fn max_pixels_validation() {
+    assert!(new(Settings { max_pixels: Some(0), ..Settings::default() }).is_err());
+    assert!(new(Settings { max_pixels: Some(480_000), width: Some(800), ..Settings::default() }).is_err());
+    assert!(new(Settings { max_pixels: Some(480_000), height: Some(600), ..Settings::default() }).is_err());
+    assert!(new(Settings { max_pixels: Some(480_000), ..Settings::default() }).is_ok());
+}
+
+#[test]
+fn max_pixels_dimensions() {
+    // Default: original resolution is kept (no downscaling by default)
+    assert_eq!(Settings::default().dimensions_for_image(1920, 1080), (1920, 1080));
+    assert_eq!(Settings::default().dimensions_for_image(800, 600), (800, 600));
+
+    // With max_pixels set:
+    let s = Settings { max_pixels: Some(800 * 600), ..Settings::default() };
+    // 800x600 = 480_000 px, not exceeded
+    assert_eq!(s.dimensions_for_image(800, 600), (800, 600));
+    // 1000x700 = 700_000 px (< 720_000 threshold), factor rounds to 1
+    assert_eq!(s.dimensions_for_image(1000, 700), (1000, 700));
+    // 1200x800 = 960_000 px (>= 720_000 threshold), factor rounds to 2
+    assert_eq!(s.dimensions_for_image(1200, 800), (600, 400));
+    // 1920x1080 = 2_073_600 px, factor rounds to 2
+    assert_eq!(s.dimensions_for_image(1920, 1080), (960, 540));
+    // 3840x2160 = 8_294_400 px, factor rounds to 4
+    assert_eq!(s.dimensions_for_image(3840, 2160), (960, 540));
+}
 

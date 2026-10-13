@@ -134,7 +134,7 @@ fn bin_main() -> BinResult<()> {
                             .num_args(1)
                             .value_parser(value_parser!(u32))
                             .value_name("px")
-                            .help("Maximum width.\nBy default anims are limited to about 800x600"))
+                            .help("Maximum width (defaults to original width)"))
                         .arg(Arg::new("height")
                             .long("height")
                             .short('H')
@@ -142,6 +142,13 @@ fn bin_main() -> BinResult<()> {
                             .value_parser(value_parser!(u32))
                             .value_name("px")
                             .help("Maximum height (scales proportionally if --width is not set, stretches if --width is also set)"))
+                        .arg(Arg::new("max-pixels")
+                            .long("max-pixels")
+                            .num_args(1)
+                            .value_parser(parse_max_pixels)
+                            .conflicts_with_all(["width", "height"])
+                            .value_name("px|WxH")
+                            .help("Maximum number of pixels before auto-downscaling triggers (e.g. 800x600, 800*600, or 480000)"))
                         .arg(Arg::new("nosort")
                             .alias("nosort")
                             .long("no-sort")
@@ -248,6 +255,7 @@ fn bin_main() -> BinResult<()> {
     let fixed_colors = matches.get_many::<Vec<rgb::RGB8>>("fixed-color").map_or_else(Vec::new, |c| c.flatten().copied().collect());
     let max_colors = matches.get_one::<u16>("max-colors").copied();
     let matte = matches.get_one::<rgb::RGB8>("matte").copied();
+    let max_pixels = matches.get_one::<u32>("max-pixels").copied();
     let settings = Settings {
         width,
         height,
@@ -261,6 +269,7 @@ fn bin_main() -> BinResult<()> {
         fixed_colors,
         max_colors,
         dithering_level,
+        max_pixels,
     };
     let quiet = matches.get_flag("quiet") || output_path == DestPath::Stdout;
     let fps: Option<f32> = matches.get_one::<f32>("fps").copied();
@@ -471,6 +480,20 @@ fn color_parser() {
     assert!(parse_colors("#12345").is_err());
 }
 
+#[test]
+fn max_pixels_parser() {
+    assert_eq!(parse_max_pixels("800x600").unwrap(), 480_000);
+    assert_eq!(parse_max_pixels("800X600").unwrap(), 480_000);
+    assert_eq!(parse_max_pixels("800*600").unwrap(), 480_000);
+    assert_eq!(parse_max_pixels(" 800 * 600 ").unwrap(), 480_000);
+    assert_eq!(parse_max_pixels("480000").unwrap(), 480_000);
+    assert_eq!(parse_max_pixels("480_000").unwrap(), 480_000);
+    assert!(parse_max_pixels("0").is_err());
+    assert!(parse_max_pixels("0x600").is_err());
+    assert!(parse_max_pixels("800x0").is_err());
+    assert!(parse_max_pixels("abc").is_err());
+}
+
 fn parse_color_space(value: &str) -> Result<MatrixCoefficients, String> {
     let value = value.to_lowercase();
     let value = value.trim();
@@ -505,6 +528,24 @@ fn parse_dithering_level(value: &str) -> Result<f32, String> {
         Ok(val)
     } else {
         Err("dithering level must be between 0.0 and 1.0".into())
+    }
+}
+
+fn parse_max_pixels(value: &str) -> Result<u32, String> {
+    let trimmed = value.trim();
+    if let Some((w_str, h_str)) = trimmed.split_once(|c| c == 'x' || c == 'X' || c == '*') {
+        let w: u32 = w_str.trim().replace('_', "").parse().map_err(|e| format!("invalid width in max-pixels: {e}"))?;
+        let h: u32 = h_str.trim().replace('_', "").parse().map_err(|e| format!("invalid height in max-pixels: {e}"))?;
+        if w == 0 || h == 0 {
+            return Err("width and height in max-pixels must be greater than 0".into());
+        }
+        w.checked_mul(h).ok_or_else(|| "max-pixels exceeds maximum value (4294967295)".into())
+    } else {
+        let px: u32 = trimmed.replace('_', "").parse().map_err(|e| format!("invalid max-pixels: {e}"))?;
+        if px == 0 {
+            return Err("max-pixels must be greater than 0".into());
+        }
+        Ok(px)
     }
 }
 
