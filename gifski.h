@@ -70,9 +70,21 @@ typedef enum GifskiSpeed : uint8_t {
   GIFSKI_SPEED_FAST = 10,
 } GifskiSpeed;
 
+typedef enum GifskiOrderedDithering : uint8_t {
+  GIFSKI_ORDERED_DITHERING_DEFAULT = 0,
+  GIFSKI_ORDERED_DITHERING_NONE = 1,
+  GIFSKI_ORDERED_DITHERING_BAYER2 = 2,
+  GIFSKI_ORDERED_DITHERING_BAYER4 = 3,
+  GIFSKI_ORDERED_DITHERING_BAYER8 = 4,
+  GIFSKI_ORDERED_DITHERING_BLUE16 = 5,
+  GIFSKI_ORDERED_DITHERING_BLUE32 = 6,
+  GIFSKI_ORDERED_DITHERING_BLUE64 = 7,
+} GifskiOrderedDithering;
+
 typedef enum GifskiSettingsMask {
   GIFSKI_SETTINGS_MATTE = 1 << 0,
   GIFSKI_SETTINGS_DITHERING_LEVEL = 1 << 1,
+  GIFSKI_SETTINGS_ALPHA_THRESHOLDS = 1 << 2,
 } GifskiSettingsMask;
 
 /**
@@ -140,6 +152,22 @@ typedef struct GifskiSettings {
    * Maximum number of pixels before auto-downscaling triggers (0 = no limit, keeps original resolution).
    */
   uint32_t max_pixels;
+  /**
+   * Dithering matrix used for semi-transparent alpha: see `GifskiOrderedDithering`. 0 (`GIFSKI_ORDERED_DITHERING_DEFAULT`) defaults to `GIFSKI_ORDERED_DITHERING_BLUE32`.
+   */
+  GifskiOrderedDithering alpha_dithering;
+  /**
+   * Minimum threshold for alpha dithering (0-255) when `GIFSKI_SETTINGS_ALPHA_THRESHOLDS` is set in `mask`.
+   */
+  uint8_t alpha_low;
+  /**
+   * Maximum threshold for alpha dithering (0-255) when `GIFSKI_SETTINGS_ALPHA_THRESHOLDS` is set in `mask`.
+   */
+  uint8_t alpha_high;
+  /**
+   * Anti-aliased edges and non-dithered threshold (0-255, 0 = default) when `GIFSKI_SETTINGS_ALPHA_THRESHOLDS` is set in `mask`.
+   */
+  uint8_t alpha_mid;
 } GifskiSettings;
 
 typedef enum GifskiError {

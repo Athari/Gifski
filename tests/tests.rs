@@ -464,4 +464,75 @@ fn max_pixels_dimensions() {
     // 3840x2160 = 8_294_400 px, factor rounds to 4
     assert_eq!(s.dimensions_for_image(3840, 2160), (960, 540));
 }
-
+
+#[test]
+fn alpha_dithering_validation() {
+    use gifski::OrderedDithering;
+
+    // Default effective_alpha_mid: low=8, high=134 => 8 + (134 - 8) / 3 * 2 = 92
+    assert_eq!(Settings::default().effective_alpha_mid(), 92);
+
+    // Overridden alpha_mid
+    let s = Settings { alpha_mid: Some(89), ..Settings::default() };
+    assert_eq!(s.effective_alpha_mid(), 89);
+
+    // Dynamic calculation with custom low/high
+    let s = Settings { alpha_low: 0, alpha_high: 255, alpha_mid: None, ..Settings::default() };
+    assert_eq!(s.effective_alpha_mid(), 170);
+
+    // Validation: alpha_low <= alpha_high
+    assert!(new(Settings { alpha_low: 100, alpha_high: 50, ..Settings::default() }).is_err());
+    assert!(new(Settings { alpha_low: 100, alpha_high: 100, ..Settings::default() }).is_ok());
+
+    // Validation: alpha_mid must be within [alpha_low, alpha_high]
+    assert!(new(Settings { alpha_low: 50, alpha_high: 100, alpha_mid: Some(40), ..Settings::default() }).is_err());
+    assert!(new(Settings { alpha_low: 50, alpha_high: 100, alpha_mid: Some(110), ..Settings::default() }).is_err());
+    assert!(new(Settings { alpha_low: 50, alpha_high: 100, alpha_mid: Some(50), ..Settings::default() }).is_ok());
+    assert!(new(Settings { alpha_low: 50, alpha_high: 100, alpha_mid: Some(100), ..Settings::default() }).is_ok());
+    assert!(new(Settings { alpha_low: 50, alpha_high: 100, alpha_mid: Some(75), ..Settings::default() }).is_ok());
+
+    // All enum variants succeed
+    for algo in [
+        OrderedDithering::None,
+        OrderedDithering::Bayer2,
+        OrderedDithering::Bayer4,
+        OrderedDithering::Bayer8,
+        OrderedDithering::Blue16,
+        OrderedDithering::Blue32,
+        OrderedDithering::Blue64,
+    ] {
+        assert!(new(Settings { alpha_dithering: algo, ..Settings::default() }).is_ok());
+    }
+}
+
+#[test]
+fn alpha_dithering_encoding() {
+    use gifski::OrderedDithering;
+
+    for algo in [
+        OrderedDithering::None,
+        OrderedDithering::Bayer2,
+        OrderedDithering::Bayer4,
+        OrderedDithering::Bayer8,
+        OrderedDithering::Blue16,
+        OrderedDithering::Blue32,
+        OrderedDithering::Blue64,
+    ] {
+        assert_anim_eq_with_settings(
+            Settings { alpha_dithering: algo, ..Settings::default() },
+            3, |n| format!("tests/a2/{:02}.png", 1 + n).into(), None, 15.0,
+        );
+    }
+
+    // Also test with custom alpha thresholds
+    assert_anim_eq_with_settings(
+        Settings {
+            alpha_dithering: OrderedDithering::Blue32,
+            alpha_low: 0,
+            alpha_high: 255,
+            alpha_mid: Some(128),
+            ..Settings::default()
+        },
+        3, |n| format!("tests/a2/{:02}.png", 1 + n).into(), None, 15.0,
+    );
+}

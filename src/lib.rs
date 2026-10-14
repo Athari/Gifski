@@ -75,6 +75,9 @@ pub mod wasm;
 #[cfg(feature = "wasm")]
 pub use wasm::GifskiWasm;
 
+mod dither;
+use dither::*;
+
 /// Number of repetitions
 pub type Repeat = gif::Repeat;
 
@@ -86,6 +89,19 @@ impl Speed {
     pub const SLOW: Self = Self(1);
     pub const MEDIUM: Self = Self(4);
     pub const FAST: Self = Self(10);
+}
+
+/// Dithering matrix used for semi-transparent alpha.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum OrderedDithering {
+    None,
+    Bayer2,
+    Bayer4,
+    Bayer8,
+    Blue16,
+    #[default]
+    Blue32,
+    Blue64,
 }
 
 /// Encoding settings for the `new()` function
@@ -117,9 +133,25 @@ pub struct Settings {
     pub dithering_level: Option<f32>,
     /// Maximum number of pixels before auto-downscaling triggers. `None` disables downscaling (keeps original resolution).
     pub max_pixels: Option<u32>,
+    /// Dithering matrix used for semi-transparent alpha. Defaults to `OrderedDithering::Blue32`.
+    pub alpha_dithering: OrderedDithering,
+    /// Minimum alpha threshold below which pixels become transparent (0-255). Defaults to 8.
+    pub alpha_low: u8,
+    /// Maximum alpha threshold at or above which pixels become opaque (0-255). Defaults to 134.
+    pub alpha_high: u8,
+    /// Threshold used for anti-aliased edges and non-dithered alpha (0-255). `None` defaults to `low + (high - low) / 3 * 2` (92 with defaults).
+    pub alpha_mid: Option<u8>,
 }
 
 impl Settings {
+    /// Effective threshold used for anti-aliased edges and non-dithered alpha.
+    #[must_use]
+    #[inline]
+    pub fn effective_alpha_mid(&self) -> u8 {
+        self.alpha_mid.unwrap_or_else(|| {
+            self.alpha_low.saturating_add((self.alpha_high.saturating_sub(self.alpha_low)) / 3 * 2)
+        })
+    }
     /// quality is used in other places, like gifsicle or frame differences,
     /// and it's better to lower quality there before ruining quantization
     pub(crate) fn color_quality(&self) -> u8 {
@@ -194,6 +226,10 @@ impl Default for Settings {
             max_colors: None,
             dithering_level: None,
             max_pixels: None,
+            alpha_dithering: OrderedDithering::default(),
+            alpha_low: 8,
+            alpha_high: 134,
+            alpha_mid: None,
         }
     }
 }
@@ -324,6 +360,12 @@ pub fn new(settings: Settings) -> GifResult<(Collector, Writer)> {
     if settings.max_pixels.is_some() && (settings.width.is_some() || settings.height.is_some()) {
         return Err(Error::WrongSize("max_pixels cannot be used together with width or height".into()));
     }
+    if settings.alpha_low > settings.alpha_high {
+        return Err(Error::WrongSize("alpha_low must be <= alpha_high".into()));
+    }
+    if settings.alpha_mid.is_some_and(|mid| mid < settings.alpha_low || mid > settings.alpha_high) {
+        return Err(Error::WrongSize("alpha_mid must be between alpha_low and alpha_high".into()));
+    }
 
     let max_threads = thread::available_parallelism().map(|t| t.get().min(255) as u8).unwrap_or(8);
     let (queue, queue_iter) = crossbeam_channel::bounded(5.min(max_threads.into())); // should be sufficient for denoiser lookahead
@@ -341,8 +383,8 @@ pub fn new(settings: Settings) -> GifResult<(Collector, Writer)> {
 
 #[inline(never)]
 #[cfg_attr(debug_assertions, track_caller)]
-fn resized_binary_alpha(image: ImgVec<RGBA8>, width: Option<u32>, height: Option<u32>, max_pixels: Option<u32>, matte: Option<RGB8>) -> CatResult<ImgVec<RGBA8>> {
-    let (width, height) = dimensions_for_image((image.width(), image.height()), (width, height), max_pixels);
+fn resized_binary_alpha(image: ImgVec<RGBA8>, settings: &Settings) -> CatResult<ImgVec<RGBA8>> {
+    let (width, height) = dimensions_for_image((image.width(), image.height()), (settings.width, settings.height), settings.max_pixels);
 
     let mut image = if width != image.width() || height != image.height() {
         let tmp = image.as_ref();
@@ -357,7 +399,7 @@ fn resized_binary_alpha(image: ImgVec<RGBA8>, width: Option<u32>, height: Option
         image
     };
 
-    if let Some(matte) = matte {
+    if let Some(matte) = settings.matte {
         image.pixels_mut().filter(|px| px.a < 255 && px.a > 0).for_each(move |px| {
             let alpha = u16::from(px.a);
             let inv_alpha = 255 - alpha;
@@ -370,7 +412,7 @@ fn resized_binary_alpha(image: ImgVec<RGBA8>, width: Option<u32>, height: Option
             };
         });
     } else {
-        dither_image(image.as_mut());
+        dither_image(image.as_mut(), settings.alpha_dithering, settings.alpha_low, settings.alpha_high, settings.effective_alpha_mid());
     }
 
     Ok(image)
@@ -379,9 +421,26 @@ fn resized_binary_alpha(image: ImgVec<RGBA8>, width: Option<u32>, height: Option
 #[allow(clippy::identity_op)]
 #[allow(clippy::erasing_op)]
 #[inline(never)]
-fn dither_image(mut image: ImgRefMut<RGBA8>) {
+fn dither_image(
+    mut image: ImgRefMut<RGBA8>,
+    alpha_dithering: OrderedDithering,
+    alpha_low: u8,
+    alpha_high: u8,
+    alpha_mid: u8,
+) {
     let width = image.width();
     let height = image.height();
+
+    let Some(matrix) = DitherMatrix::for_algorithm(alpha_dithering) else {
+        for row in image.rows_mut() {
+            for px in row.iter_mut() {
+                if px.a < 255 {
+                    px.a = if px.a < alpha_mid { 0 } else { 255 };
+                }
+            }
+        }
+        return;
+    };
 
     // dithering of anti-aliased edges can look very fuzzy, so disable it near the edges
     let mut anti_aliasing = vec![false; width * height];
@@ -400,25 +459,26 @@ fn dither_image(mut image: ImgRefMut<RGBA8>) {
         }
     });
 
-    // this table is already biased, so that px.a doesn't need to be changed
-    const DITHER: [u8; 64] = [
-     0*2+8,48*2+8,12*2+8,60*2+8, 3*2+8,51*2+8,15*2+8,63*2+8,
-    32*2+8,16*2+8,44*2+8,28*2+8,35*2+8,19*2+8,47*2+8,31*2+8,
-     8*2+8,56*2+8, 4*2+8,52*2+8,11*2+8,59*2+8, 7*2+8,55*2+8,
-    40*2+8,24*2+8,36*2+8,20*2+8,43*2+8,27*2+8,39*2+8,23*2+8,
-     2*2+8,50*2+8,14*2+8,62*2+8, 1*2+8,49*2+8,13*2+8,61*2+8,
-    34*2+8,18*2+8,46*2+8,30*2+8,33*2+8,17*2+8,45*2+8,29*2+8,
-    10*2+8,58*2+8, 6*2+8,54*2+8, 9*2+8,57*2+8, 5*2+8,53*2+8,
-    42*2+8,26*2+8,38*2+8,22*2+8,41*2+8,25*2+8,37*2+8,21*2+8];
+    let x_mask = matrix.width - 1;
+    let y_mask = matrix.height - 1;
+    let m_width = matrix.width;
+    let max_val = matrix.max_val;
+    let range = (alpha_high - alpha_low) as u16;
+
+    let mut lut = [0u8; 256];
+    for (val, slot) in lut[..=max_val as usize].iter_mut().enumerate() {
+        *slot = (alpha_low as u16 + (val as u16 * range + max_val / 2) / max_val) as u8;
+    }
 
     // Make transparency binary
     for (y, (row, aa)) in image.rows_mut().zip(anti_aliasing.chunks_exact(width)).enumerate() {
         for (x, (px, aa)) in row.iter_mut().zip(aa.iter().copied()).enumerate() {
             if px.a < 255 {
                 if aa {
-                    px.a = if px.a < 89 { 0 } else { 255 };
+                    px.a = if px.a < alpha_mid { 0 } else { 255 };
                 } else {
-                    px.a = if px.a < DITHER[(y & 7) * 8 + (x & 7)] { 0 } else { 255 };
+                    let dither_val = matrix.data[(y & y_mask) * m_width + (x & x_mask)];
+                    px.a = if px.a < lut[dither_val as usize] { 0 } else { 255 };
                 }
             }
         }
@@ -703,7 +763,7 @@ impl Writer {
                         Img::new(image.buffer, image.width, image.height)
                     },
                 };
-                let resized = resized_binary_alpha(image, self.settings.width, self.settings.height, self.settings.max_pixels, self.settings.matte)?;
+                let resized = resized_binary_alpha(image, &self.settings)?;
                 let frame_blurred = if self.settings.slow() { smart_blur(resized.as_ref()) } else { less_smart_blur(resized.as_ref()) };
                 diff_queue.send(frame.frame_index, InputFrameResized {
                     original_index: frame.frame_index,

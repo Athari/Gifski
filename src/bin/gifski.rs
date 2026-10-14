@@ -11,7 +11,7 @@
 use clap::builder::NonEmptyStringValueParser;
 use clap::error::ErrorKind::MissingRequiredArgument;
 use clap::value_parser;
-use gifski::{Repeat, Settings, Speed};
+use gifski::{OrderedDithering, Repeat, Settings, Speed};
 use std::io::{BufRead, BufReader, IsTerminal, Read, StdinLock, Stdout, stdin};
 use yuv::color::MatrixCoefficients;
 
@@ -128,6 +128,36 @@ fn bin_main() -> BinResult<()> {
                             .value_parser(parse_dithering_level)
                             .num_args(1)
                             .help("Error diffusion dithering level (0.0 = none, 1.0 = full; by default based on --quality and --lossy-quality)"))
+                        .arg(Arg::new("alpha-dithering")
+                            .long("alpha-dithering")
+                            .value_name("matrix")
+                            .value_parser(parse_ordered_dithering)
+                            .num_args(1)
+                            .default_value("blue32")
+                            .help("Matrix used for alpha transparency dithering: none|bayer2|bayer4|bayer8|blue16|blue32|blue64 (defaults to blue32)"))
+                        .arg(Arg::new("alpha-low")
+                            .long("alpha-low")
+                            .value_name("0-255")
+                            .value_parser(value_parser!(u8))
+                            .num_args(1)
+                            .default_value("8")
+                            .hide_short_help(true)
+                            .help("Minimum alpha threshold below which pixels become transparent (defaults to 8)"))
+                        .arg(Arg::new("alpha-high")
+                            .long("alpha-high")
+                            .value_name("0-255")
+                            .value_parser(value_parser!(u8))
+                            .num_args(1)
+                            .default_value("134")
+                            .hide_short_help(true)
+                            .help("Maximum alpha threshold at or above which pixels become opaque (defaults to 134)"))
+                        .arg(Arg::new("alpha-mid")
+                            .long("alpha-mid")
+                            .value_name("0-255")
+                            .value_parser(value_parser!(u8))
+                            .num_args(1)
+                            .hide_short_help(true)
+                            .help("Threshold for anti-aliased edges and non-dithered alpha (defaults to low + (high - low) / 3 * 2)"))
                         .arg(Arg::new("width")
                             .long("width")
                             .short('W')
@@ -256,6 +286,10 @@ fn bin_main() -> BinResult<()> {
     let max_colors = matches.get_one::<u16>("max-colors").copied();
     let matte = matches.get_one::<rgb::RGB8>("matte").copied();
     let max_pixels = matches.get_one::<u32>("max-pixels").copied();
+    let alpha_dithering = matches.get_one::<OrderedDithering>("alpha-dithering").copied().unwrap_or_default();
+    let alpha_low = matches.get_one::<u8>("alpha-low").copied().unwrap_or(8);
+    let alpha_high = matches.get_one::<u8>("alpha-high").copied().unwrap_or(134);
+    let alpha_mid = matches.get_one::<u8>("alpha-mid").copied();
     let settings = Settings {
         width,
         height,
@@ -270,6 +304,10 @@ fn bin_main() -> BinResult<()> {
         max_colors,
         dithering_level,
         max_pixels,
+        alpha_dithering,
+        alpha_low,
+        alpha_high,
+        alpha_mid,
     };
     let quiet = matches.get_flag("quiet") || output_path == DestPath::Stdout;
     let fps: Option<f32> = matches.get_one::<f32>("fps").copied();
@@ -494,6 +532,31 @@ fn max_pixels_parser() {
     assert!(parse_max_pixels("abc").is_err());
 }
 
+#[test]
+fn ordered_dithering_parser() {
+    assert_eq!(parse_ordered_dithering("none").unwrap(), OrderedDithering::None);
+    assert_eq!(parse_ordered_dithering("bayer2").unwrap(), OrderedDithering::Bayer2);
+    assert_eq!(parse_ordered_dithering("bayer-2").unwrap(), OrderedDithering::Bayer2);
+    assert_eq!(parse_ordered_dithering("bayer2x2").unwrap(), OrderedDithering::Bayer2);
+    assert_eq!(parse_ordered_dithering("bayer-2x2").unwrap(), OrderedDithering::Bayer2);
+    assert_eq!(parse_ordered_dithering("bayer4").unwrap(), OrderedDithering::Bayer4);
+    assert_eq!(parse_ordered_dithering("bayer-4").unwrap(), OrderedDithering::Bayer4);
+    assert_eq!(parse_ordered_dithering("bayer4x4").unwrap(), OrderedDithering::Bayer4);
+    assert_eq!(parse_ordered_dithering("bayer-4x4").unwrap(), OrderedDithering::Bayer4);
+    assert_eq!(parse_ordered_dithering("bayer8").unwrap(), OrderedDithering::Bayer8);
+    assert_eq!(parse_ordered_dithering("bayer-8").unwrap(), OrderedDithering::Bayer8);
+    assert_eq!(parse_ordered_dithering("bayer8x8").unwrap(), OrderedDithering::Bayer8);
+    assert_eq!(parse_ordered_dithering("bayer-8x8").unwrap(), OrderedDithering::Bayer8);
+    assert_eq!(parse_ordered_dithering("blue16").unwrap(), OrderedDithering::Blue16);
+    assert_eq!(parse_ordered_dithering("blue-16").unwrap(), OrderedDithering::Blue16);
+    assert_eq!(parse_ordered_dithering("blue16x16").unwrap(), OrderedDithering::Blue16);
+    assert_eq!(parse_ordered_dithering("blue-16x16").unwrap(), OrderedDithering::Blue16);
+    assert_eq!(parse_ordered_dithering("blue32").unwrap(), OrderedDithering::Blue32);
+    assert_eq!(parse_ordered_dithering("blue64").unwrap(), OrderedDithering::Blue64);
+    assert!(parse_ordered_dithering("invalid").is_err());
+    assert!(parse_ordered_dithering("blue256").is_err());
+}
+
 fn parse_color_space(value: &str) -> Result<MatrixCoefficients, String> {
     let value = value.to_lowercase();
     let value = value.trim();
@@ -546,6 +609,19 @@ fn parse_max_pixels(value: &str) -> Result<u32, String> {
             return Err("max-pixels must be greater than 0".into());
         }
         Ok(px)
+    }
+}
+
+fn parse_ordered_dithering(value: &str) -> Result<OrderedDithering, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "none" => Ok(OrderedDithering::None),
+        "bayer2" => Ok(OrderedDithering::Bayer2),
+        "bayer4" => Ok(OrderedDithering::Bayer4),
+        "bayer8" => Ok(OrderedDithering::Bayer8),
+        "blue16" => Ok(OrderedDithering::Blue16),
+        "blue32" => Ok(OrderedDithering::Blue32),
+        "blue64" => Ok(OrderedDithering::Blue64),
+        _ => Err("dithering must be none, bayer2, bayer4, bayer8, blue16, blue32, blue64, or blue128".into()),
     }
 }
 

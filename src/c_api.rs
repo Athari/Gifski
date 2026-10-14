@@ -44,7 +44,7 @@
 //! it will build `target/aarch64-apple-ios/release/libgifski.a` (ignore the warning about cdylib).
 
 use crate::progress::ProgressCallback;
-use crate::{CCallbacks, Collector, ErrorCallback, ProgressReporter, Repeat, Settings, Speed, Writer};
+use crate::{OrderedDithering, CCallbacks, Collector, ErrorCallback, ProgressReporter, Repeat, Settings, Speed, Writer};
 use imgref::{Img, ImgVec};
 use rgb::{RGB8, RGBA8};
 use std::fs;
@@ -65,6 +65,7 @@ use std::panic::catch_unwind;
 
 pub const GIFSKI_SETTINGS_MATTE: u32 = 1 << 0;
 pub const GIFSKI_SETTINGS_DITHERING_LEVEL: u32 = 1 << 1;
+pub const GIFSKI_SETTINGS_ALPHA_THRESHOLDS: u32 = 1 << 2;
 
 /// Encoding speed level
 #[repr(u8)]
@@ -75,6 +76,21 @@ pub enum GifskiSpeed {
     Slow = 1,
     Medium = 4,
     Fast = 10,
+}
+
+/// Dithering matrix used for semi-transparent alpha
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum GifskiOrderedDithering {
+    #[default]
+    Default = 0,
+    None = 1,
+    Bayer2 = 2,
+    Bayer4 = 3,
+    Bayer8 = 4,
+    Blue16 = 5,
+    Blue32 = 6,
+    Blue64 = 7,
 }
 
 /// Settings for creating a new encoder instance. See `gifski_new`
@@ -111,6 +127,14 @@ pub struct GifskiSettings {
     pub dithering_level: f32,
     /// Maximum number of pixels before auto-downscaling triggers (0 = no limit, keeps original resolution).
     pub max_pixels: u32,
+    /// Dithering matrix used for semi-transparent alpha: see `GifskiOrderedDithering`. 0 (`GIFSKI_ORDERED_DITHERING_DEFAULT`) defaults to `GIFSKI_ORDERED_DITHERING_BLUE32`.
+    pub alpha_dithering: GifskiOrderedDithering,
+    /// Minimum threshold for alpha dithering (0-255) when `GIFSKI_SETTINGS_ALPHA_THRESHOLDS` is set in `mask`.
+    pub alpha_low: u8,
+    /// Maximum threshold for alpha dithering (0-255) when `GIFSKI_SETTINGS_ALPHA_THRESHOLDS` is set in `mask`.
+    pub alpha_high: u8,
+    /// Anti-aliased edges and non-dithered threshold (0-255, 0 = default) when `GIFSKI_SETTINGS_ALPHA_THRESHOLDS` is set in `mask`.
+    pub alpha_mid: u8,
 }
 
 impl Default for GifskiSettings {
@@ -131,6 +155,10 @@ impl Default for GifskiSettings {
             max_colors: 0,
             dithering_level: 0.0,
             max_pixels: 0,
+            alpha_dithering: GifskiOrderedDithering::Default,
+            alpha_low: 8,
+            alpha_high: 134,
+            alpha_mid: 0,
         }
     }
 }
@@ -186,6 +214,24 @@ pub unsafe extern "C" fn gifski_new(settings: *const GifskiSettings) -> *const G
     } else {
         Vec::new()
     };
+    let alpha_dithering = match settings.alpha_dithering {
+        GifskiOrderedDithering::Default | GifskiOrderedDithering::Blue32 => OrderedDithering::Blue32,
+        GifskiOrderedDithering::None => OrderedDithering::None,
+        GifskiOrderedDithering::Bayer2 => OrderedDithering::Bayer2,
+        GifskiOrderedDithering::Bayer4 => OrderedDithering::Bayer4,
+        GifskiOrderedDithering::Bayer8 => OrderedDithering::Bayer8,
+        GifskiOrderedDithering::Blue16 => OrderedDithering::Blue16,
+        GifskiOrderedDithering::Blue64 => OrderedDithering::Blue64,
+    };
+    let (alpha_low, alpha_high, alpha_mid) = if (settings.mask & GIFSKI_SETTINGS_ALPHA_THRESHOLDS) != 0 {
+        (
+            settings.alpha_low,
+            settings.alpha_high,
+            if settings.alpha_mid > 0 { Some(settings.alpha_mid) } else { None },
+        )
+    } else {
+        (8, 134, None)
+    };
     let s = Settings {
         width: if settings.width > 0 { Some(settings.width) } else { None },
         height: if settings.height > 0 { Some(settings.height) } else { None },
@@ -200,6 +246,10 @@ pub unsafe extern "C" fn gifski_new(settings: *const GifskiSettings) -> *const G
         max_colors: if settings.max_colors > 0 { Some(settings.max_colors) } else { None },
         dithering_level: if (settings.mask & GIFSKI_SETTINGS_DITHERING_LEVEL) != 0 { Some(settings.dithering_level) } else { None },
         max_pixels: if settings.max_pixels > 0 { Some(settings.max_pixels) } else { None },
+        alpha_dithering,
+        alpha_low,
+        alpha_high,
+        alpha_mid,
     };
 
     if let Ok((collector, writer)) = crate::new(s) {
@@ -902,5 +952,60 @@ fn c_settings_max_pixels() {
             ..GifskiSettings::default()
         });
         assert!(g.is_null());
+    }
+}
+
+#[test]
+fn c_settings_alpha_dithering() {
+    assert_eq!(1, mem::size_of::<GifskiOrderedDithering>());
+
+    unsafe {
+        for algo in [
+            GifskiOrderedDithering::Default,
+            GifskiOrderedDithering::None,
+            GifskiOrderedDithering::Bayer2,
+            GifskiOrderedDithering::Bayer4,
+            GifskiOrderedDithering::Bayer8,
+            GifskiOrderedDithering::Blue16,
+            GifskiOrderedDithering::Blue32,
+            GifskiOrderedDithering::Blue64,
+        ] {
+            let g = gifski_new(&GifskiSettings {
+                alpha_dithering: algo,
+                ..GifskiSettings::default()
+            });
+            assert!(!g.is_null());
+            let _ = gifski_finish(g);
+        }
+
+        // Invalid thresholds fail when GIFSKI_SETTINGS_ALPHA_THRESHOLDS is set
+        let g = gifski_new(&GifskiSettings {
+            mask: GIFSKI_SETTINGS_ALPHA_THRESHOLDS,
+            alpha_low: 150,
+            alpha_high: 50,
+            ..GifskiSettings::default()
+        });
+        assert!(g.is_null());
+
+        // Invalid thresholds ignored when GIFSKI_SETTINGS_ALPHA_THRESHOLDS is not set
+        let g = gifski_new(&GifskiSettings {
+            mask: 0,
+            alpha_low: 150,
+            alpha_high: 50,
+            ..GifskiSettings::default()
+        });
+        assert!(!g.is_null());
+        let _ = gifski_finish(g);
+
+        // Valid thresholds succeed
+        let g = gifski_new(&GifskiSettings {
+            mask: GIFSKI_SETTINGS_ALPHA_THRESHOLDS,
+            alpha_low: 10,
+            alpha_high: 200,
+            alpha_mid: 100,
+            ..GifskiSettings::default()
+        });
+        assert!(!g.is_null());
+        let _ = gifski_finish(g);
     }
 }
