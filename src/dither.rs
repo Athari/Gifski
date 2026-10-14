@@ -442,6 +442,7 @@ pub fn dither_color(
     palette: &[RGBA8],
     matrix: DitherMatrix,
     dithering_level: f32,
+    exact_match: bool,
     background: Option<ImgRef<RGBA8>>,
     out: &mut [u8],
 ) {
@@ -563,9 +564,14 @@ pub fn dither_color(
                 let bg_px = bg_row[x];
                 if bg_px.a > 128 {
                     let dithered_color = palette[dithered_idx as usize];
-                    let dither_diff = color_diff_rgb(px, dithered_color);
-                    let bg_diff = color_diff_rgb(px, bg_px);
-                    if bg_diff <= dither_diff {
+                    let matches_bg = if exact_match {
+                        dithered_color.rgb() == bg_px.rgb()
+                    } else {
+                        let dither_diff = color_diff_rgb(px, dithered_color);
+                        let bg_diff = color_diff_rgb(px, bg_px);
+                        bg_diff <= dither_diff
+                    };
+                    if matches_bg {
                         final_idx = trans_idx;
                     }
                 }
@@ -607,7 +613,7 @@ mod tests {
             let mut out = vec![0u8; 32 * 32];
 
             // At dithering_level = 0.1, flat area must have zero stray pixels: all pixels map to nearest neighbor (1)
-            dither_color(img.as_ref(), &palette, matrix, 0.1, None, &mut out);
+            dither_color(img.as_ref(), &palette, matrix, 0.1, true, None, &mut out);
             assert!(
                 out.iter().all(|&idx| idx == 1),
                 "flat area at dithering_level 0.1 with {:?} produced stray pixels",
@@ -615,12 +621,62 @@ mod tests {
             );
 
             // At dithering_level = 0.0, all pixels must map to nearest neighbor (1)
-            dither_color(img.as_ref(), &palette, matrix, 0.0, None, &mut out);
+            dither_color(img.as_ref(), &palette, matrix, 0.0, true, None, &mut out);
             assert!(
                 out.iter().all(|&idx| idx == 1),
                 "flat area at dithering_level 0.0 with {:?} produced stray pixels",
                 algo
             );
+        }
+    }
+
+    #[test]
+    fn test_dither_color_motion_quality_no_smearing() {
+        // Transparent palette entry 0, color A at 1, color B at 2
+        let palette = vec![
+            RGBA8::new(0, 0, 0, 0),
+            RGBA8::new(98, 98, 98, 255),
+            RGBA8::new(110, 110, 110, 255),
+        ];
+
+        // Background canvas previously had color A (98, 98, 98)
+        let bg_data = vec![RGBA8::new(98, 98, 98, 255); 4 * 4];
+        let bg = Img::new(bg_data, 4, 4);
+
+        // Input pixel px = (102, 102, 102): closer to 98 (diff 48) than to 110 (diff 192).
+        let px = RGBA8::new(102, 102, 102, 255);
+        let img_data = vec![px; 4 * 4];
+        let img = Img::new(img_data, 4, 4);
+
+        let matrix = DitherMatrix::for_algorithm(Dithering::Bayer2).unwrap();
+        let mut out = vec![0u8; 4 * 4];
+
+        // When exact_match is false (e.g. motion_quality < 100), perceptual check bg_diff <= dither_diff
+        // forces all pixels to 0 (transparent) because bg_px (98) is closer to px (102) than dithered_color (110).
+        dither_color(img.as_ref(), &palette, matrix, 1.0, false, Some(bg.as_ref()), &mut out);
+        assert!(
+            out.iter().all(|&idx| idx == 0),
+            "when exact_match is false, perceptual check should reuse background for all pixels"
+        );
+
+        // When exact_match is true (motion_quality == 100), exact match is required:
+        // pixels that dither to color B (2) must NOT be suppressed into transparent (0).
+        dither_color(img.as_ref(), &palette, matrix, 1.0, true, Some(bg.as_ref()), &mut out);
+        assert!(
+            out.contains(&2),
+            "when exact_match is true, pixels dithering to color B must not be smeared into transparent"
+        );
+
+        // When background actually matches color B (110, 110, 110),
+        // all pixels that dither to color B (2) must be transparent (0) for compression.
+        let bg_matching_data = vec![RGBA8::new(110, 110, 110, 255); 4 * 4];
+        let bg_matching = Img::new(bg_matching_data, 4, 4);
+        let mut out_matching = vec![0u8; 4 * 4];
+        dither_color(img.as_ref(), &palette, matrix, 1.0, true, Some(bg_matching.as_ref()), &mut out_matching);
+        for i in 0..16 {
+            if out[i] == 2 {
+                assert_eq!(out_matching[i], 0, "identical output pixel must be marked transparent");
+            }
         }
     }
 }

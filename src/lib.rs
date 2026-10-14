@@ -664,11 +664,13 @@ impl Writer {
             let pal = res.palette_vec();
             pal_img.resize(width * height, 0);
             let src = source_image.as_ref().expect("source_image required for ordered color dithering");
+            let exact_match = self.settings.effective_motion_quality() == 100;
             dither_color(
                 src.as_ref(),
                 &pal,
                 matrix,
                 self.settings.effective_dithering_level(),
+                exact_match,
                 background,
                 &mut pal_img,
             );
@@ -826,7 +828,8 @@ impl Writer {
             LastFrameDuration::FrameRate(0.)
         };
 
-        let mut denoiser = Denoiser::new(first_frame.frame.width(), first_frame.frame.height(), self.settings.effective_motion_quality())?;
+        let bypass_temporal_filter = self.settings.effective_motion_quality() == 100 && self.settings.color_dithering.is_ordered();
+        let mut denoiser = Denoiser::new(first_frame.frame.width(), first_frame.frame.height(), self.settings.effective_motion_quality(), bypass_temporal_filter)?;
 
         let mut ordinal_frame_number = 0;
         let mut next_original_index_expected = 0;
@@ -863,8 +866,9 @@ impl Writer {
                 }
                 last_frame_pts = pts;
 
-                denoiser.push_frame(frame.as_ref(), frame_blurred.as_ref(), (ordinal_frame_number, pts, last_frame_duration)).map_err(|_| {
-                    Error::WrongSize(format!("Frame {ordinal_frame_number} has wrong size ({}×{})", frame.width(), frame.height()))
+                let (width, height) = (frame.width(), frame.height());
+                denoiser.push_frame(frame, frame_blurred.as_ref(), (ordinal_frame_number, pts, last_frame_duration)).map_err(|_| {
+                    Error::WrongSize(format!("Frame {ordinal_frame_number} has wrong size ({width}×{height})"))
                 })?;
             } else {
                 denoiser.flush();
@@ -949,7 +953,8 @@ impl Writer {
 
             let importance_map = importance_map.take().ok_or(Error::ThreadSend)?; // always set at the beginning
 
-            if !prev_frame_keeps || importance_map.iter().any(|&px| px > 0) {
+            let bypass_drop = self.settings.effective_motion_quality() == 100 && self.settings.color_dithering.is_ordered();
+            if !prev_frame_keeps || bypass_drop || importance_map.iter().any(|&px| px > 0) {
                 let end_pts = if let Some(&DiffMessage { pts: next_pts, .. }) = next_frame.as_ref() {
                     next_pts
                 } else {
@@ -974,7 +979,7 @@ impl Writer {
 
     /// Clear pixels that didn't change compared to the background when the previous frame keeps its buffer.
     fn clear_unchanged_background(&self, image: &mut ImgVec<RGBA8>, importance_map: &[u8], frame_index: u32, prev_frame_keeps: bool) {
-        if prev_frame_keeps {
+        if prev_frame_keeps && !self.settings.color_dithering.is_ordered() {
             // if denoiser says the background didn't change, then believe it
             // (except higher quality settings, which try to improve it every time)
             let bg_keep_likelihood = u32::from(self.settings.quality.saturating_sub(80) / 4);
