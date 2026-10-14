@@ -433,7 +433,6 @@ fn find_nearest(candidate_palette: &[(u8, RGBA8)], r: f32, g: f32, b: f32) -> (u
 
 /// When true, contracts matrix candidate sampling towards the nearest palette color
 /// proportional to `dithering_level`, eliminating stray dither noise in flat areas.
-pub const CONTRACT_MATRIX_SAMPLING: bool = true;
 
 /// Dither colors using Thomas Knoll's pattern dithering (local error feedback).
 #[inline(never)]
@@ -474,8 +473,8 @@ pub fn dither_color(
     // so K is capped at 16 to avoid severe performance degradation.
     let k = (matrix.width * matrix.height).min(16);
 
-    let x_base = 4.0 / k as f32;
-    let err_multiplier = dithering_level * x_base;
+    let err_multiplier = dithering_level;
+    let error_decay = dithering_level;
 
     let x_mask = matrix.width - 1;
     let y_mask = matrix.height - 1;
@@ -489,7 +488,6 @@ pub fn dither_color(
 
         let mut prev_px: Option<RGBA8> = None;
         let mut candidates = [0u8; 64];
-        let mut nearest_pos = 0usize;
 
         for x in 0..width {
             let px = img_row[x];
@@ -509,55 +507,26 @@ pub fn dither_color(
                 if dithering_level == 0.0 {
                     let (nearest_idx, _) = find_nearest(&opaque_palette, px_r, px_g, px_b);
                     candidates[..k].fill(nearest_idx);
-                    nearest_pos = 0;
                 } else {
                     let mut err_r = 0.0f32;
                     let mut err_g = 0.0f32;
                     let mut err_b = 0.0f32;
-                    let mut candidate_0 = 0u8;
-                    for (i, cand) in candidates[..k].iter_mut().enumerate() {
+                    for cand in candidates[..k].iter_mut() {
                         let tr = (px_r + err_r * err_multiplier).clamp(0.0, 255.0);
                         let tg = (px_g + err_g * err_multiplier).clamp(0.0, 255.0);
                         let tb = (px_b + err_b * err_multiplier).clamp(0.0, 255.0);
                         let (chosen_idx, chosen_color) = find_nearest(&opaque_palette, tr, tg, tb);
                         *cand = chosen_idx;
-                        if i == 0 {
-                            candidate_0 = chosen_idx;
-                        }
-                        err_r += px_r - chosen_color.r as f32;
-                        err_g += px_g - chosen_color.g as f32;
-                        err_b += px_b - chosen_color.b as f32;
+                        err_r = err_r * error_decay + (px_r - chosen_color.r as f32);
+                        err_g = err_g * error_decay + (px_g - chosen_color.g as f32);
+                        err_b = err_b * error_decay + (px_b - chosen_color.b as f32);
                     }
                     candidates[..k].sort_unstable_by_key(|&idx| palette_luma[idx as usize]);
-
-                    if CONTRACT_MATRIX_SAMPLING {
-                        let mut first_pos = None;
-                        let mut last_pos = None;
-                        for (idx, &c) in candidates[..k].iter().enumerate() {
-                            if c == candidate_0 {
-                                if first_pos.is_none() {
-                                    first_pos = Some(idx);
-                                }
-                                last_pos = Some(idx);
-                            }
-                        }
-                        nearest_pos = match (first_pos, last_pos) {
-                            (Some(f), Some(l)) => (f + l) / 2,
-                            _ => (k - 1) / 2,
-                        };
-                    }
                 }
             }
 
             let dither_val = matrix.data[(y & y_mask) * m_width + (x & x_mask)] as usize;
-            let raw_candidate_idx = (dither_val * k) / (max_val + 1);
-            let candidate_idx = if CONTRACT_MATRIX_SAMPLING {
-                let delta = (raw_candidate_idx as f32 - nearest_pos as f32) * dithering_level;
-                (nearest_pos as f32 + delta).round().clamp(0.0, (k - 1) as f32) as usize
-            } else {
-                raw_candidate_idx
-            };
-            let dithered_idx = candidates[candidate_idx];
+            let dithered_idx = candidates[(dither_val * k) / (max_val + 1)];
 
             let mut final_idx = dithered_idx;
             if let (Some(bg_row), Some(trans_idx)) = (bg_row, transparent_index) {
