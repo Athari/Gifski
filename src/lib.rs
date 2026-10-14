@@ -91,10 +91,11 @@ impl Speed {
     pub const FAST: Self = Self(10);
 }
 
-/// Dithering matrix used for semi-transparent alpha.
+/// Dithering algorithm or matrix.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub enum OrderedDithering {
+pub enum Dithering {
     None,
+    FloydSteinberg,
     Bayer2,
     Bayer4,
     Bayer8,
@@ -102,6 +103,14 @@ pub enum OrderedDithering {
     #[default]
     Blue32,
     Blue64,
+}
+
+impl Dithering {
+    #[must_use]
+    #[inline]
+    pub fn is_ordered(&self) -> bool {
+        !matches!(self, Self::None | Self::FloydSteinberg)
+    }
 }
 
 /// Encoding settings for the `new()` function
@@ -133,8 +142,10 @@ pub struct Settings {
     pub dithering_level: Option<f32>,
     /// Maximum number of pixels before auto-downscaling triggers. `None` disables downscaling (keeps original resolution).
     pub max_pixels: Option<u32>,
-    /// Dithering matrix used for semi-transparent alpha. Defaults to `OrderedDithering::Blue32`.
-    pub alpha_dithering: OrderedDithering,
+    /// Dithering matrix used for semi-transparent alpha. Defaults to `Dithering::Blue32`.
+    pub alpha_dithering: Dithering,
+    /// Dithering algorithm or matrix used for colors. Defaults to `Dithering::FloydSteinberg`.
+    pub color_dithering: Dithering,
     /// Minimum alpha threshold below which pixels become transparent (0-255). Defaults to 8.
     pub alpha_low: u8,
     /// Maximum alpha threshold at or above which pixels become opaque (0-255). Defaults to 134.
@@ -226,7 +237,8 @@ impl Default for Settings {
             max_colors: None,
             dithering_level: None,
             max_pixels: None,
-            alpha_dithering: OrderedDithering::default(),
+            alpha_dithering: Dithering::Blue32,
+            color_dithering: Dithering::FloydSteinberg,
             alpha_low: 8,
             alpha_high: 134,
             alpha_mid: None,
@@ -285,6 +297,7 @@ struct RemapMessage {
     liq_image: Image<'static>,
     out_buf: Vec<u8>,
     has_next_frame: bool,
+    source_image: Option<ImgVec<RGBA8>>,
 }
 
 /// Frame post quantization and remap
@@ -344,6 +357,9 @@ pub fn new(settings: Settings) -> GifResult<(Collector, Writer)> {
     }
     if settings.dithering_level.is_some_and(|d| !(0.0..=1.0).contains(&d)) {
         return Err(Error::WrongSize("dithering_level must be 0.0-1.0".into()));
+    }
+    if settings.alpha_dithering == Dithering::FloydSteinberg {
+        return Err(Error::WrongSize("floyd-steinberg is not supported for alpha dithering".into()));
     }
     if settings.max_colors.is_some_and(|c| c < 2 || c > 256) {
         return Err(Error::WrongSize("max_colors must be 2-256".into()));
@@ -423,7 +439,7 @@ fn resized_binary_alpha(image: ImgVec<RGBA8>, settings: &Settings) -> CatResult<
 #[inline(never)]
 fn dither_image(
     mut image: ImgRefMut<RGBA8>,
-    alpha_dithering: OrderedDithering,
+    alpha_dithering: Dithering,
     alpha_low: u8,
     alpha_high: u8,
     alpha_mid: u8,
@@ -607,7 +623,11 @@ impl Writer {
                 res = requantize(liq)?;
             }
         }
-        res.set_dithering_level(self.settings.effective_dithering_level())?;
+        if self.settings.color_dithering == Dithering::FloydSteinberg {
+            res.set_dithering_level(self.settings.effective_dithering_level())?;
+        } else {
+            res.set_dithering_level(0.0)?;
+        }
         Ok(res)
     }
 
@@ -616,7 +636,9 @@ impl Writer {
         let (width, height) = (img.width(), img.height());
         let mut out = Vec::new();
         out.try_reserve_exact(width * height).map_err(imagequant::liq_error::from)?;
-        res.optionally_prepare_for_dithering_with_background_set(img, &mut out.spare_capacity_mut()[..width * height])?;
+        if self.settings.color_dithering == Dithering::FloydSteinberg {
+            res.optionally_prepare_for_dithering_with_background_set(img, &mut out.spare_capacity_mut()[..width * height])?;
+        }
         Ok(out)
     }
 
@@ -636,15 +658,31 @@ impl Writer {
         Ok((liq, res, img, out))
     }
 
-    fn remap<'a>(&self, liq: Attributes, mut res: QuantizationResult, mut img: Image<'a>, background: Option<ImgRef<'a, RGBA8>>, mut pal_img: Vec<u8>) -> CatResult<(ImgVec<u8>, Vec<RGBA8>)> {
-        if let Some(bg) = background {
-            img.set_background(Image::new_stride_borrowed(&liq, bg.buf(), bg.width(), bg.height(), bg.stride(), 0.)?)?;
+    fn remap<'a>(&self, liq: Attributes, mut res: QuantizationResult, mut img: Image<'a>, background: Option<ImgRef<'a, RGBA8>>, mut pal_img: Vec<u8>, source_image: Option<ImgVec<RGBA8>>) -> CatResult<(ImgVec<u8>, Vec<RGBA8>)> {
+        let (width, height) = (img.width(), img.height());
+        if let Some(matrix) = DitherMatrix::for_algorithm(self.settings.color_dithering) {
+            let pal = res.palette_vec();
+            pal_img.resize(width * height, 0);
+            let src = source_image.as_ref().expect("source_image required for ordered color dithering");
+            dither_color(
+                src.as_ref(),
+                &pal,
+                matrix,
+                self.settings.effective_dithering_level(),
+                background,
+                &mut pal_img,
+            );
+            Ok((Img::new(pal_img, width, height), pal))
+        } else {
+            if let Some(bg) = background {
+                img.set_background(Image::new_stride_borrowed(&liq, bg.buf(), bg.width(), bg.height(), bg.stride(), 0.)?)?;
+            }
+
+            let pal = res.remap_into_vec(&mut img, &mut pal_img)?;
+            debug_assert_eq!(img.width() * img.height(), pal_img.len());
+
+            Ok((Img::new(pal_img, width, height), pal))
         }
-
-        let pal = res.remap_into_vec(&mut img, &mut pal_img)?;
-        debug_assert_eq!(img.width() * img.height(), pal_img.len());
-
-        Ok((Img::new(pal_img, img.width(), img.height()), pal))
     }
 
     #[inline(never)]
@@ -952,6 +990,11 @@ impl Writer {
         }, move |QuantizeMessage { end_pts, mut image, importance_map, ordinal_frame_number, frame_index, dispose, first_frame_has_transparency, prev_frame_keeps, has_next_frame }| {
             self.clear_unchanged_background(&mut image, &importance_map, frame_index, prev_frame_keeps);
 
+            let source_image = if self.settings.color_dithering.is_ordered() {
+                Some(image.clone())
+            } else {
+                None
+            };
             let needs_transparency = frame_index > 0 || (frame_index == 0 && first_frame_has_transparency);
             let (liq, remap, liq_image, out_buf) = self.quantize(image, &importance_map, frame_index == 0, needs_transparency, prev_frame_keeps)?;
 
@@ -963,6 +1006,7 @@ impl Writer {
                 liq_image,
                 out_buf,
                 has_next_frame,
+                source_image,
             })?)
         })
     }
@@ -999,20 +1043,25 @@ impl Writer {
             // because there's a transparent hole in the background not taken into account,
             // and palette may lack colors to fill that hole
             let set_importance_map = msg.frame_index == 0 || msg.prev_frame_keeps;
+            let source_image = if self.settings.color_dithering.is_ordered() {
+                Some(msg.image.clone())
+            } else {
+                None
+            };
             let mut img = self.new_liq_image(&liq, msg.image, &msg.importance_map, set_importance_map, needs_transparency)?;
             hist.add_image(&liq, &mut img)?;
-            prepared.push((msg.ordinal_frame_number, msg.frame_index, msg.end_pts, msg.dispose, msg.has_next_frame, img));
+            prepared.push((msg.ordinal_frame_number, msg.frame_index, msg.end_pts, msg.dispose, msg.has_next_frame, img, source_image));
         }
 
         let res = hist.quantize(&liq)?;
         let res = self.tune_quantization_result(&mut liq, res, |liq| hist.quantize(liq).map_err(From::from))?;
 
         minipool::new_channel(self.max_threads.min(4.try_into()?), "quant", move |quant_queue| {
-            for (ordinal_frame_number, frame_index, end_pts, dispose, has_next_frame, img) in prepared {
-                quant_queue.send((ordinal_frame_number, frame_index, end_pts, dispose, has_next_frame, img, res.clone(), liq.clone()))?;
+            for (ordinal_frame_number, frame_index, end_pts, dispose, has_next_frame, img, source_image) in prepared {
+                quant_queue.send((ordinal_frame_number, frame_index, end_pts, dispose, has_next_frame, img, source_image, res.clone(), liq.clone()))?;
             }
             Ok(())
-        }, move |(ordinal_frame_number, frame_index, end_pts, dispose, has_next_frame, mut img, mut remap, liq)| {
+        }, move |(ordinal_frame_number, frame_index, end_pts, dispose, has_next_frame, mut img, source_image, mut remap, liq)| {
             let out = self.prepare_dither_out(&mut remap, &mut img)?;
             Ok(remap_queue.send(frame_index as usize, RemapMessage {
                 ordinal_frame_number,
@@ -1023,6 +1072,7 @@ impl Writer {
                 liq_image: img,
                 out_buf: out,
                 has_next_frame,
+                source_image,
             })?)
         })
     }
@@ -1036,7 +1086,7 @@ impl Writer {
         let mut debug_screen = gif_dispose::Screen::new(first_frame.liq_image.width(), first_frame.liq_image.height(), None);
 
         let mut next_frame = Some(first_frame);
-        while let Some(RemapMessage {ordinal_frame_number, end_pts, dispose, liq, remap, liq_image, out_buf, has_next_frame}) = next_frame {
+        while let Some(RemapMessage {ordinal_frame_number, end_pts, dispose, liq, remap, liq_image, out_buf, has_next_frame, source_image}) = next_frame {
             let pixels = screen.pixels_rgba();
             let screen_width = pixels.width() as u16;
             let screen_height = pixels.height() as u16;
@@ -1044,7 +1094,7 @@ impl Writer {
 
             let (mut image8, image8_pal) = {
                 let bg = if frame_index != 0 { Some(screen_after_dispose.pixels_rgba()) } else { None };
-                self.remap(liq, remap, liq_image, bg, out_buf)?
+                self.remap(liq, remap, liq_image, bg, out_buf, source_image)?
             };
 
             let (image8_pal, transparent_index) = transparent_index_from_palette(image8_pal, image8.as_mut());

@@ -70,16 +70,17 @@ typedef enum GifskiSpeed : uint8_t {
   GIFSKI_SPEED_FAST = 10,
 } GifskiSpeed;
 
-typedef enum GifskiOrderedDithering : uint8_t {
-  GIFSKI_ORDERED_DITHERING_DEFAULT = 0,
-  GIFSKI_ORDERED_DITHERING_NONE = 1,
-  GIFSKI_ORDERED_DITHERING_BAYER2 = 2,
-  GIFSKI_ORDERED_DITHERING_BAYER4 = 3,
-  GIFSKI_ORDERED_DITHERING_BAYER8 = 4,
-  GIFSKI_ORDERED_DITHERING_BLUE16 = 5,
-  GIFSKI_ORDERED_DITHERING_BLUE32 = 6,
-  GIFSKI_ORDERED_DITHERING_BLUE64 = 7,
-} GifskiOrderedDithering;
+typedef enum GifskiDithering : uint8_t {
+  GIFSKI_DITHERING_DEFAULT = 0,
+  GIFSKI_DITHERING_NONE = 1,
+  GIFSKI_DITHERING_FLOYD_STEINBERG = 2,
+  GIFSKI_DITHERING_BAYER2 = 3,
+  GIFSKI_DITHERING_BAYER4 = 4,
+  GIFSKI_DITHERING_BAYER8 = 5,
+  GIFSKI_DITHERING_BLUE16 = 6,
+  GIFSKI_DITHERING_BLUE32 = 7,
+  GIFSKI_DITHERING_BLUE64 = 8,
+} GifskiDithering;
 
 typedef enum GifskiSettingsMask {
   GIFSKI_SETTINGS_MATTE = 1 << 0,
@@ -153,9 +154,13 @@ typedef struct GifskiSettings {
    */
   uint32_t max_pixels;
   /**
-   * Dithering matrix used for semi-transparent alpha: see `GifskiOrderedDithering`. 0 (`GIFSKI_ORDERED_DITHERING_DEFAULT`) defaults to `GIFSKI_ORDERED_DITHERING_BLUE32`.
+   * Dithering matrix used for semi-transparent alpha: see `GifskiDithering`. 0 (`GIFSKI_DITHERING_DEFAULT`) defaults to `GIFSKI_DITHERING_BLUE32`.
    */
-  GifskiOrderedDithering alpha_dithering;
+  GifskiDithering alpha_dithering;
+  /**
+   * Dithering algorithm or matrix used for colors: see `GifskiDithering`. 0 (`GIFSKI_DITHERING_DEFAULT`) defaults to `GIFSKI_DITHERING_FLOYD_STEINBERG`.
+   */
+  GifskiDithering color_dithering;
   /**
    * Minimum threshold for alpha dithering (0-255) when `GIFSKI_SETTINGS_ALPHA_THRESHOLDS` is set in `mask`.
    */

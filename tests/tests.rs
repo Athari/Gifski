@@ -467,7 +467,7 @@ fn max_pixels_dimensions() {
 
 #[test]
 fn alpha_dithering_validation() {
-    use gifski::OrderedDithering;
+    use gifski::Dithering;
 
     // Default effective_alpha_mid: low=8, high=134 => 8 + (134 - 8) / 3 * 2 = 92
     assert_eq!(Settings::default().effective_alpha_mid(), 92);
@@ -491,32 +491,47 @@ fn alpha_dithering_validation() {
     assert!(new(Settings { alpha_low: 50, alpha_high: 100, alpha_mid: Some(100), ..Settings::default() }).is_ok());
     assert!(new(Settings { alpha_low: 50, alpha_high: 100, alpha_mid: Some(75), ..Settings::default() }).is_ok());
 
-    // All enum variants succeed
+    // All valid alpha enum variants succeed, FloydSteinberg fails
     for algo in [
-        OrderedDithering::None,
-        OrderedDithering::Bayer2,
-        OrderedDithering::Bayer4,
-        OrderedDithering::Bayer8,
-        OrderedDithering::Blue16,
-        OrderedDithering::Blue32,
-        OrderedDithering::Blue64,
+        Dithering::None,
+        Dithering::Bayer2,
+        Dithering::Bayer4,
+        Dithering::Bayer8,
+        Dithering::Blue16,
+        Dithering::Blue32,
+        Dithering::Blue64,
     ] {
         assert!(new(Settings { alpha_dithering: algo, ..Settings::default() }).is_ok());
+    }
+    assert!(new(Settings { alpha_dithering: Dithering::FloydSteinberg, ..Settings::default() }).is_err());
+
+    // All color enum variants succeed
+    for algo in [
+        Dithering::None,
+        Dithering::FloydSteinberg,
+        Dithering::Bayer2,
+        Dithering::Bayer4,
+        Dithering::Bayer8,
+        Dithering::Blue16,
+        Dithering::Blue32,
+        Dithering::Blue64,
+    ] {
+        assert!(new(Settings { color_dithering: algo, ..Settings::default() }).is_ok());
     }
 }
 
 #[test]
 fn alpha_dithering_encoding() {
-    use gifski::OrderedDithering;
+    use gifski::Dithering;
 
     for algo in [
-        OrderedDithering::None,
-        OrderedDithering::Bayer2,
-        OrderedDithering::Bayer4,
-        OrderedDithering::Bayer8,
-        OrderedDithering::Blue16,
-        OrderedDithering::Blue32,
-        OrderedDithering::Blue64,
+        Dithering::None,
+        Dithering::Bayer2,
+        Dithering::Bayer4,
+        Dithering::Bayer8,
+        Dithering::Blue16,
+        Dithering::Blue32,
+        Dithering::Blue64,
     ] {
         assert_anim_eq_with_settings(
             Settings { alpha_dithering: algo, ..Settings::default() },
@@ -527,7 +542,7 @@ fn alpha_dithering_encoding() {
     // Also test with custom alpha thresholds
     assert_anim_eq_with_settings(
         Settings {
-            alpha_dithering: OrderedDithering::Blue32,
+            alpha_dithering: Dithering::Blue32,
             alpha_low: 0,
             alpha_high: 255,
             alpha_mid: Some(128),
@@ -536,3 +551,35 @@ fn alpha_dithering_encoding() {
         3, |n| format!("tests/a2/{:02}.png", 1 + n).into(), None, 15.0,
     );
 }
+
+#[test]
+fn color_dithering_encoding() {
+    use gifski::Dithering;
+
+    for algo in [
+        Dithering::None,
+        Dithering::FloydSteinberg,
+        Dithering::Bayer2,
+        Dithering::Bayer4,
+        Dithering::Bayer8,
+        Dithering::Blue16,
+        Dithering::Blue32,
+        Dithering::Blue64,
+    ] {
+        assert_anim_eq_with_settings(
+            Settings { color_dithering: algo, ..Settings::default() },
+            3, |n| format!("tests/a2/{:02}.png", 1 + n).into(), None, 15.0,
+        );
+    }
+
+    // Also test with custom dithering_level
+    assert_anim_eq_with_settings(
+        Settings {
+            color_dithering: Dithering::Bayer4,
+            dithering_level: Some(0.5),
+            ..Settings::default()
+        },
+        3, |n| format!("tests/a2/{:02}.png", 1 + n).into(), None, 15.0,
+    );
+}
+

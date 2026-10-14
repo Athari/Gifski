@@ -11,7 +11,7 @@
 use clap::builder::NonEmptyStringValueParser;
 use clap::error::ErrorKind::MissingRequiredArgument;
 use clap::value_parser;
-use gifski::{OrderedDithering, Repeat, Settings, Speed};
+use gifski::{Dithering, Repeat, Settings, Speed};
 use std::io::{BufRead, BufReader, IsTerminal, Read, StdinLock, Stdout, stdin};
 use yuv::color::MatrixCoefficients;
 
@@ -128,10 +128,17 @@ fn bin_main() -> BinResult<()> {
                             .value_parser(parse_dithering_level)
                             .num_args(1)
                             .help("Error diffusion dithering level (0.0 = none, 1.0 = full; by default based on --quality and --lossy-quality)"))
+                        .arg(Arg::new("color-dithering")
+                            .long("color-dithering")
+                            .value_name("matrix")
+                            .value_parser(parse_color_dithering)
+                            .num_args(1)
+                            .default_value("floyd-steinberg")
+                            .help("Algorithm or matrix used for color dithering: none|floyd-steinberg|bayer2|bayer4|bayer8|blue16|blue32|blue64 (defaults to floyd-steinberg)"))
                         .arg(Arg::new("alpha-dithering")
                             .long("alpha-dithering")
                             .value_name("matrix")
-                            .value_parser(parse_ordered_dithering)
+                            .value_parser(parse_alpha_dithering)
                             .num_args(1)
                             .default_value("blue32")
                             .help("Matrix used for alpha transparency dithering: none|bayer2|bayer4|bayer8|blue16|blue32|blue64 (defaults to blue32)"))
@@ -286,7 +293,8 @@ fn bin_main() -> BinResult<()> {
     let max_colors = matches.get_one::<u16>("max-colors").copied();
     let matte = matches.get_one::<rgb::RGB8>("matte").copied();
     let max_pixels = matches.get_one::<u32>("max-pixels").copied();
-    let alpha_dithering = matches.get_one::<OrderedDithering>("alpha-dithering").copied().unwrap_or_default();
+    let alpha_dithering = matches.get_one::<Dithering>("alpha-dithering").copied().unwrap_or(Dithering::Blue32);
+    let color_dithering = matches.get_one::<Dithering>("color-dithering").copied().unwrap_or(Dithering::FloydSteinberg);
     let alpha_low = matches.get_one::<u8>("alpha-low").copied().unwrap_or(8);
     let alpha_high = matches.get_one::<u8>("alpha-high").copied().unwrap_or(134);
     let alpha_mid = matches.get_one::<u8>("alpha-mid").copied();
@@ -305,6 +313,7 @@ fn bin_main() -> BinResult<()> {
         dithering_level,
         max_pixels,
         alpha_dithering,
+        color_dithering,
         alpha_low,
         alpha_high,
         alpha_mid,
@@ -533,28 +542,28 @@ fn max_pixels_parser() {
 }
 
 #[test]
-fn ordered_dithering_parser() {
-    assert_eq!(parse_ordered_dithering("none").unwrap(), OrderedDithering::None);
-    assert_eq!(parse_ordered_dithering("bayer2").unwrap(), OrderedDithering::Bayer2);
-    assert_eq!(parse_ordered_dithering("bayer-2").unwrap(), OrderedDithering::Bayer2);
-    assert_eq!(parse_ordered_dithering("bayer2x2").unwrap(), OrderedDithering::Bayer2);
-    assert_eq!(parse_ordered_dithering("bayer-2x2").unwrap(), OrderedDithering::Bayer2);
-    assert_eq!(parse_ordered_dithering("bayer4").unwrap(), OrderedDithering::Bayer4);
-    assert_eq!(parse_ordered_dithering("bayer-4").unwrap(), OrderedDithering::Bayer4);
-    assert_eq!(parse_ordered_dithering("bayer4x4").unwrap(), OrderedDithering::Bayer4);
-    assert_eq!(parse_ordered_dithering("bayer-4x4").unwrap(), OrderedDithering::Bayer4);
-    assert_eq!(parse_ordered_dithering("bayer8").unwrap(), OrderedDithering::Bayer8);
-    assert_eq!(parse_ordered_dithering("bayer-8").unwrap(), OrderedDithering::Bayer8);
-    assert_eq!(parse_ordered_dithering("bayer8x8").unwrap(), OrderedDithering::Bayer8);
-    assert_eq!(parse_ordered_dithering("bayer-8x8").unwrap(), OrderedDithering::Bayer8);
-    assert_eq!(parse_ordered_dithering("blue16").unwrap(), OrderedDithering::Blue16);
-    assert_eq!(parse_ordered_dithering("blue-16").unwrap(), OrderedDithering::Blue16);
-    assert_eq!(parse_ordered_dithering("blue16x16").unwrap(), OrderedDithering::Blue16);
-    assert_eq!(parse_ordered_dithering("blue-16x16").unwrap(), OrderedDithering::Blue16);
-    assert_eq!(parse_ordered_dithering("blue32").unwrap(), OrderedDithering::Blue32);
-    assert_eq!(parse_ordered_dithering("blue64").unwrap(), OrderedDithering::Blue64);
-    assert!(parse_ordered_dithering("invalid").is_err());
-    assert!(parse_ordered_dithering("blue256").is_err());
+fn dithering_parser() {
+    assert_eq!(parse_alpha_dithering("none").unwrap(), Dithering::None);
+    assert_eq!(parse_alpha_dithering("bayer2").unwrap(), Dithering::Bayer2);
+    assert_eq!(parse_alpha_dithering("bayer4").unwrap(), Dithering::Bayer4);
+    assert_eq!(parse_alpha_dithering("bayer8").unwrap(), Dithering::Bayer8);
+    assert_eq!(parse_alpha_dithering("blue16").unwrap(), Dithering::Blue16);
+    assert_eq!(parse_alpha_dithering("blue32").unwrap(), Dithering::Blue32);
+    assert_eq!(parse_alpha_dithering("blue64").unwrap(), Dithering::Blue64);
+    assert!(parse_alpha_dithering("floyd-steinberg").is_err());
+    assert!(parse_alpha_dithering("invalid").is_err());
+    assert!(parse_alpha_dithering("blue256").is_err());
+
+    assert_eq!(parse_color_dithering("none").unwrap(), Dithering::None);
+    assert_eq!(parse_color_dithering("floyd-steinberg").unwrap(), Dithering::FloydSteinberg);
+    assert_eq!(parse_color_dithering("bayer2").unwrap(), Dithering::Bayer2);
+    assert_eq!(parse_color_dithering("bayer4").unwrap(), Dithering::Bayer4);
+    assert_eq!(parse_color_dithering("bayer8").unwrap(), Dithering::Bayer8);
+    assert_eq!(parse_color_dithering("blue16").unwrap(), Dithering::Blue16);
+    assert_eq!(parse_color_dithering("blue32").unwrap(), Dithering::Blue32);
+    assert_eq!(parse_color_dithering("blue64").unwrap(), Dithering::Blue64);
+    assert!(parse_color_dithering("invalid").is_err());
+    assert!(parse_color_dithering("blue256").is_err());
 }
 
 fn parse_color_space(value: &str) -> Result<MatrixCoefficients, String> {
@@ -612,16 +621,30 @@ fn parse_max_pixels(value: &str) -> Result<u32, String> {
     }
 }
 
-fn parse_ordered_dithering(value: &str) -> Result<OrderedDithering, String> {
+fn parse_alpha_dithering(value: &str) -> Result<Dithering, String> {
     match value.trim().to_ascii_lowercase().as_str() {
-        "none" => Ok(OrderedDithering::None),
-        "bayer2" => Ok(OrderedDithering::Bayer2),
-        "bayer4" => Ok(OrderedDithering::Bayer4),
-        "bayer8" => Ok(OrderedDithering::Bayer8),
-        "blue16" => Ok(OrderedDithering::Blue16),
-        "blue32" => Ok(OrderedDithering::Blue32),
-        "blue64" => Ok(OrderedDithering::Blue64),
-        _ => Err("dithering must be none, bayer2, bayer4, bayer8, blue16, blue32, blue64, or blue128".into()),
+        "none" => Ok(Dithering::None),
+        "bayer2" => Ok(Dithering::Bayer2),
+        "bayer4" => Ok(Dithering::Bayer4),
+        "bayer8" => Ok(Dithering::Bayer8),
+        "blue16" => Ok(Dithering::Blue16),
+        "blue32" => Ok(Dithering::Blue32),
+        "blue64" => Ok(Dithering::Blue64),
+        _ => Err("alpha dithering must be none, bayer2, bayer4, bayer8, blue16, blue32, or blue64".into()),
+    }
+}
+
+fn parse_color_dithering(value: &str) -> Result<Dithering, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "none" => Ok(Dithering::None),
+        "floyd-steinberg" => Ok(Dithering::FloydSteinberg),
+        "bayer2" => Ok(Dithering::Bayer2),
+        "bayer4" => Ok(Dithering::Bayer4),
+        "bayer8" => Ok(Dithering::Bayer8),
+        "blue16" => Ok(Dithering::Blue16),
+        "blue32" => Ok(Dithering::Blue32),
+        "blue64" => Ok(Dithering::Blue64),
+        _ => Err("color dithering must be none, floyd-steinberg, bayer2, bayer4, bayer8, blue16, blue32, or blue64".into()),
     }
 }
 

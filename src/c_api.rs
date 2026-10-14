@@ -44,7 +44,7 @@
 //! it will build `target/aarch64-apple-ios/release/libgifski.a` (ignore the warning about cdylib).
 
 use crate::progress::ProgressCallback;
-use crate::{OrderedDithering, CCallbacks, Collector, ErrorCallback, ProgressReporter, Repeat, Settings, Speed, Writer};
+use crate::{Dithering, CCallbacks, Collector, ErrorCallback, ProgressReporter, Repeat, Settings, Speed, Writer};
 use imgref::{Img, ImgVec};
 use rgb::{RGB8, RGBA8};
 use std::fs;
@@ -78,19 +78,20 @@ pub enum GifskiSpeed {
     Fast = 10,
 }
 
-/// Dithering matrix used for semi-transparent alpha
+/// Dithering algorithm or matrix
 #[repr(u8)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub enum GifskiOrderedDithering {
+pub enum GifskiDithering {
     #[default]
     Default = 0,
     None = 1,
-    Bayer2 = 2,
-    Bayer4 = 3,
-    Bayer8 = 4,
-    Blue16 = 5,
-    Blue32 = 6,
-    Blue64 = 7,
+    FloydSteinberg = 2,
+    Bayer2 = 3,
+    Bayer4 = 4,
+    Bayer8 = 5,
+    Blue16 = 6,
+    Blue32 = 7,
+    Blue64 = 8,
 }
 
 /// Settings for creating a new encoder instance. See `gifski_new`
@@ -127,8 +128,10 @@ pub struct GifskiSettings {
     pub dithering_level: f32,
     /// Maximum number of pixels before auto-downscaling triggers (0 = no limit, keeps original resolution).
     pub max_pixels: u32,
-    /// Dithering matrix used for semi-transparent alpha: see `GifskiOrderedDithering`. 0 (`GIFSKI_ORDERED_DITHERING_DEFAULT`) defaults to `GIFSKI_ORDERED_DITHERING_BLUE32`.
-    pub alpha_dithering: GifskiOrderedDithering,
+    /// Dithering matrix used for semi-transparent alpha: see `GifskiDithering`. 0 (`GIFSKI_DITHERING_DEFAULT`) defaults to `GIFSKI_DITHERING_BLUE32`.
+    pub alpha_dithering: GifskiDithering,
+    /// Dithering algorithm or matrix used for colors: see `GifskiDithering`. 0 (`GIFSKI_DITHERING_DEFAULT`) defaults to `GIFSKI_DITHERING_FLOYD_STEINBERG`.
+    pub color_dithering: GifskiDithering,
     /// Minimum threshold for alpha dithering (0-255) when `GIFSKI_SETTINGS_ALPHA_THRESHOLDS` is set in `mask`.
     pub alpha_low: u8,
     /// Maximum threshold for alpha dithering (0-255) when `GIFSKI_SETTINGS_ALPHA_THRESHOLDS` is set in `mask`.
@@ -155,7 +158,8 @@ impl Default for GifskiSettings {
             max_colors: 0,
             dithering_level: 0.0,
             max_pixels: 0,
-            alpha_dithering: GifskiOrderedDithering::Default,
+            alpha_dithering: GifskiDithering::Default,
+            color_dithering: GifskiDithering::Default,
             alpha_low: 8,
             alpha_high: 134,
             alpha_mid: 0,
@@ -215,13 +219,24 @@ pub unsafe extern "C" fn gifski_new(settings: *const GifskiSettings) -> *const G
         Vec::new()
     };
     let alpha_dithering = match settings.alpha_dithering {
-        GifskiOrderedDithering::Default | GifskiOrderedDithering::Blue32 => OrderedDithering::Blue32,
-        GifskiOrderedDithering::None => OrderedDithering::None,
-        GifskiOrderedDithering::Bayer2 => OrderedDithering::Bayer2,
-        GifskiOrderedDithering::Bayer4 => OrderedDithering::Bayer4,
-        GifskiOrderedDithering::Bayer8 => OrderedDithering::Bayer8,
-        GifskiOrderedDithering::Blue16 => OrderedDithering::Blue16,
-        GifskiOrderedDithering::Blue64 => OrderedDithering::Blue64,
+        GifskiDithering::Default | GifskiDithering::Blue32 => Dithering::Blue32,
+        GifskiDithering::None => Dithering::None,
+        GifskiDithering::FloydSteinberg => Dithering::FloydSteinberg,
+        GifskiDithering::Bayer2 => Dithering::Bayer2,
+        GifskiDithering::Bayer4 => Dithering::Bayer4,
+        GifskiDithering::Bayer8 => Dithering::Bayer8,
+        GifskiDithering::Blue16 => Dithering::Blue16,
+        GifskiDithering::Blue64 => Dithering::Blue64,
+    };
+    let color_dithering = match settings.color_dithering {
+        GifskiDithering::Default | GifskiDithering::FloydSteinberg => Dithering::FloydSteinberg,
+        GifskiDithering::None => Dithering::None,
+        GifskiDithering::Bayer2 => Dithering::Bayer2,
+        GifskiDithering::Bayer4 => Dithering::Bayer4,
+        GifskiDithering::Bayer8 => Dithering::Bayer8,
+        GifskiDithering::Blue16 => Dithering::Blue16,
+        GifskiDithering::Blue32 => Dithering::Blue32,
+        GifskiDithering::Blue64 => Dithering::Blue64,
     };
     let (alpha_low, alpha_high, alpha_mid) = if (settings.mask & GIFSKI_SETTINGS_ALPHA_THRESHOLDS) != 0 {
         (
@@ -247,6 +262,7 @@ pub unsafe extern "C" fn gifski_new(settings: *const GifskiSettings) -> *const G
         dithering_level: if (settings.mask & GIFSKI_SETTINGS_DITHERING_LEVEL) != 0 { Some(settings.dithering_level) } else { None },
         max_pixels: if settings.max_pixels > 0 { Some(settings.max_pixels) } else { None },
         alpha_dithering,
+        color_dithering,
         alpha_low,
         alpha_high,
         alpha_mid,
@@ -956,19 +972,19 @@ fn c_settings_max_pixels() {
 }
 
 #[test]
-fn c_settings_alpha_dithering() {
-    assert_eq!(1, mem::size_of::<GifskiOrderedDithering>());
+fn c_settings_dithering() {
+    assert_eq!(1, mem::size_of::<GifskiDithering>());
 
     unsafe {
         for algo in [
-            GifskiOrderedDithering::Default,
-            GifskiOrderedDithering::None,
-            GifskiOrderedDithering::Bayer2,
-            GifskiOrderedDithering::Bayer4,
-            GifskiOrderedDithering::Bayer8,
-            GifskiOrderedDithering::Blue16,
-            GifskiOrderedDithering::Blue32,
-            GifskiOrderedDithering::Blue64,
+            GifskiDithering::Default,
+            GifskiDithering::None,
+            GifskiDithering::Bayer2,
+            GifskiDithering::Bayer4,
+            GifskiDithering::Bayer8,
+            GifskiDithering::Blue16,
+            GifskiDithering::Blue32,
+            GifskiDithering::Blue64,
         ] {
             let g = gifski_new(&GifskiSettings {
                 alpha_dithering: algo,
@@ -977,6 +993,32 @@ fn c_settings_alpha_dithering() {
             assert!(!g.is_null());
             let _ = gifski_finish(g);
         }
+
+        for algo in [
+            GifskiDithering::Default,
+            GifskiDithering::None,
+            GifskiDithering::FloydSteinberg,
+            GifskiDithering::Bayer2,
+            GifskiDithering::Bayer4,
+            GifskiDithering::Bayer8,
+            GifskiDithering::Blue16,
+            GifskiDithering::Blue32,
+            GifskiDithering::Blue64,
+        ] {
+            let g = gifski_new(&GifskiSettings {
+                color_dithering: algo,
+                ..GifskiSettings::default()
+            });
+            assert!(!g.is_null());
+            let _ = gifski_finish(g);
+        }
+
+        // Floyd-Steinberg is not supported for alpha dithering
+        let g = gifski_new(&GifskiSettings {
+            alpha_dithering: GifskiDithering::FloydSteinberg,
+            ..GifskiSettings::default()
+        });
+        assert!(g.is_null());
 
         // Invalid thresholds fail when GIFSKI_SETTINGS_ALPHA_THRESHOLDS is set
         let g = gifski_new(&GifskiSettings {

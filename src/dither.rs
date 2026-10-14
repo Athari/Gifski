@@ -4,7 +4,9 @@
 //! https://github.com/Calinou/free-blue-noise-textures
 //! http://momentsingraphics.de/BlueNoise.html
 
-use crate::OrderedDithering;
+use crate::Dithering;
+use imgref::ImgRef;
+use rgb::RGBA8;
 
 #[derive(Copy, Clone, Debug)]
 pub struct DitherMatrix {
@@ -15,15 +17,15 @@ pub struct DitherMatrix {
 }
 
 impl DitherMatrix {
-    pub fn for_algorithm(algo: OrderedDithering) -> Option<Self> {
+    pub fn for_algorithm(algo: Dithering) -> Option<Self> {
         match algo {
-            OrderedDithering::None => None,
-            OrderedDithering::Bayer2 => Some(Self { data: &BAYER_2X2, width: 2, height: 2, max_val: 3 }),
-            OrderedDithering::Bayer4 => Some(Self { data: &BAYER_4X4, width: 4, height: 4, max_val: 15 }),
-            OrderedDithering::Bayer8 => Some(Self { data: &BAYER_8X8, width: 8, height: 8, max_val: 63 }),
-            OrderedDithering::Blue16 => Some(Self { data: &BLUE_NOISE_16X16, width: 16, height: 16, max_val: 255 }),
-            OrderedDithering::Blue32 => Some(Self { data: &BLUE_NOISE_32X32, width: 32, height: 32, max_val: 255 }),
-            OrderedDithering::Blue64 => Some(Self { data: &BLUE_NOISE_64X64, width: 64, height: 64, max_val: 255 }),
+            Dithering::None | Dithering::FloydSteinberg => None,
+            Dithering::Bayer2 => Some(Self { data: &BAYER_2X2, width: 2, height: 2, max_val: 3 }),
+            Dithering::Bayer4 => Some(Self { data: &BAYER_4X4, width: 4, height: 4, max_val: 15 }),
+            Dithering::Bayer8 => Some(Self { data: &BAYER_8X8, width: 8, height: 8, max_val: 63 }),
+            Dithering::Blue16 => Some(Self { data: &BLUE_NOISE_16X16, width: 16, height: 16, max_val: 255 }),
+            Dithering::Blue32 => Some(Self { data: &BLUE_NOISE_32X32, width: 32, height: 32, max_val: 255 }),
+            Dithering::Blue64 => Some(Self { data: &BLUE_NOISE_64X64, width: 64, height: 64, max_val: 255 }),
         }
     }
 }
@@ -390,3 +392,235 @@ pub static BLUE_NOISE_64X64: [u8; 4096] = [
      49,  86,  26,  75, 170,  53, 213,  21, 149,  46, 103, 142, 119,  37,  73, 227,
      17, 108, 159, 216, 125, 233, 181,  99,  38, 118,  58, 137,  71, 251,  29, 133,
 ];
+
+#[inline(always)]
+fn color_diff_rgb(c1: RGBA8, c2: RGBA8) -> u32 {
+    let dr = c1.r as i32 - c2.r as i32;
+    let dg = c1.g as i32 - c2.g as i32;
+    let db = c1.b as i32 - c2.b as i32;
+    let l1 = c1.r as i32 * 299 + c1.g as i32 * 587 + c1.b as i32 * 114;
+    let l2 = c2.r as i32 * 299 + c2.g as i32 * 587 + c2.b as i32 * 114;
+    let dl = (l1 - l2) / 1000;
+    ((dr * dr * 299 + dg * dg * 587 + db * db * 114) * 3 / 4000 + dl * dl) as u32
+}
+
+#[inline(always)]
+fn color_diff_f32(r: f32, g: f32, b: f32, c2: RGBA8) -> f32 {
+    let dr = r - c2.r as f32;
+    let dg = g - c2.g as f32;
+    let db = b - c2.b as f32;
+    let l1 = (r * 299.0 + g * 587.0 + b * 114.0) * (1.0 / 1000.0);
+    let l2 = (c2.r as f32 * 299.0 + c2.g as f32 * 587.0 + c2.b as f32 * 114.0) * (1.0 / 1000.0);
+    let dl = l1 - l2;
+    (dr * dr * 0.299 + dg * dg * 0.587 + db * db * 0.114) * 0.75 + dl * dl
+}
+
+#[inline(always)]
+fn find_nearest(candidate_palette: &[(u8, RGBA8)], r: f32, g: f32, b: f32) -> (u8, RGBA8) {
+    let mut best_diff = f32::MAX;
+    let mut best_idx = candidate_palette[0].0;
+    let mut best_color = candidate_palette[0].1;
+    for &(idx, color) in candidate_palette {
+        let diff = color_diff_f32(r, g, b, color);
+        if diff < best_diff {
+            best_diff = diff;
+            best_idx = idx;
+            best_color = color;
+        }
+    }
+    (best_idx, best_color)
+}
+
+/// When true, contracts matrix candidate sampling towards the nearest palette color
+/// proportional to `dithering_level`, eliminating stray dither noise in flat areas.
+pub const CONTRACT_MATRIX_SAMPLING: bool = true;
+
+/// Dither colors using Thomas Knoll's pattern dithering (local error feedback).
+#[inline(never)]
+pub fn dither_color(
+    image: ImgRef<RGBA8>,
+    palette: &[RGBA8],
+    matrix: DitherMatrix,
+    dithering_level: f32,
+    background: Option<ImgRef<RGBA8>>,
+    out: &mut [u8],
+) {
+    let width = image.width();
+    let height = image.height();
+
+    let transparent_index = palette.iter().position(|p| p.a <= 128).map(|i| i as u8);
+
+    let mut opaque_palette = Vec::with_capacity(palette.len());
+    for (i, &p) in palette.iter().enumerate() {
+        if p.a > 128 {
+            opaque_palette.push((i as u8, p));
+        }
+    }
+    if opaque_palette.is_empty() {
+        for (i, &p) in palette.iter().enumerate() {
+            opaque_palette.push((i as u8, p));
+        }
+    }
+
+    let mut palette_luma = [0u32; 256];
+    for (i, p) in palette.iter().enumerate() {
+        palette_luma[i] = p.r as u32 * 299 + p.g as u32 * 587 + p.b as u32 * 114;
+    }
+
+    // Number of candidate colors per pixel. Thomas Knoll's pattern dithering algorithm
+    // was originally designed for a 4x4 Bayer matrix using 16 candidates. For larger matrices
+    // (e.g. 8x8 or 32x32 blue noise), candidate generation without spatial acceleration is O(K * |palette|),
+    // so K is capped at 16 to avoid severe performance degradation.
+    let k = (matrix.width * matrix.height).min(16);
+
+    let x_base = 4.0 / k as f32;
+    let err_multiplier = dithering_level * x_base;
+
+    let x_mask = matrix.width - 1;
+    let y_mask = matrix.height - 1;
+    let m_width = matrix.width;
+    let max_val = matrix.max_val as usize;
+
+    for y in 0..height {
+        let img_row = &image.buf()[y * image.stride()..y * image.stride() + width];
+        let out_row = &mut out[y * width..(y + 1) * width];
+        let bg_row = background.map(|bg| &bg.buf()[y * bg.stride()..y * bg.stride() + width]);
+
+        let mut prev_px: Option<RGBA8> = None;
+        let mut candidates = [0u8; 64];
+        let mut nearest_pos = 0usize;
+
+        for x in 0..width {
+            let px = img_row[x];
+            if px.a <= 128 {
+                if let Some(trans) = transparent_index {
+                    out_row[x] = trans;
+                    continue;
+                }
+            }
+
+            if prev_px != Some(px) {
+                prev_px = Some(px);
+                let px_r = px.r as f32;
+                let px_g = px.g as f32;
+                let px_b = px.b as f32;
+
+                if dithering_level == 0.0 {
+                    let (nearest_idx, _) = find_nearest(&opaque_palette, px_r, px_g, px_b);
+                    candidates[..k].fill(nearest_idx);
+                    nearest_pos = 0;
+                } else {
+                    let mut err_r = 0.0f32;
+                    let mut err_g = 0.0f32;
+                    let mut err_b = 0.0f32;
+                    let mut candidate_0 = 0u8;
+                    for (i, cand) in candidates[..k].iter_mut().enumerate() {
+                        let tr = (px_r + err_r * err_multiplier).clamp(0.0, 255.0);
+                        let tg = (px_g + err_g * err_multiplier).clamp(0.0, 255.0);
+                        let tb = (px_b + err_b * err_multiplier).clamp(0.0, 255.0);
+                        let (chosen_idx, chosen_color) = find_nearest(&opaque_palette, tr, tg, tb);
+                        *cand = chosen_idx;
+                        if i == 0 {
+                            candidate_0 = chosen_idx;
+                        }
+                        err_r += px_r - chosen_color.r as f32;
+                        err_g += px_g - chosen_color.g as f32;
+                        err_b += px_b - chosen_color.b as f32;
+                    }
+                    candidates[..k].sort_unstable_by_key(|&idx| palette_luma[idx as usize]);
+
+                    if CONTRACT_MATRIX_SAMPLING {
+                        let mut first_pos = None;
+                        let mut last_pos = None;
+                        for (idx, &c) in candidates[..k].iter().enumerate() {
+                            if c == candidate_0 {
+                                if first_pos.is_none() {
+                                    first_pos = Some(idx);
+                                }
+                                last_pos = Some(idx);
+                            }
+                        }
+                        nearest_pos = match (first_pos, last_pos) {
+                            (Some(f), Some(l)) => (f + l) / 2,
+                            _ => (k - 1) / 2,
+                        };
+                    }
+                }
+            }
+
+            let dither_val = matrix.data[(y & y_mask) * m_width + (x & x_mask)] as usize;
+            let raw_candidate_idx = (dither_val * k) / (max_val + 1);
+            let candidate_idx = if CONTRACT_MATRIX_SAMPLING {
+                let delta = (raw_candidate_idx as f32 - nearest_pos as f32) * dithering_level;
+                (nearest_pos as f32 + delta).round().clamp(0.0, (k - 1) as f32) as usize
+            } else {
+                raw_candidate_idx
+            };
+            let dithered_idx = candidates[candidate_idx];
+
+            let mut final_idx = dithered_idx;
+            if let (Some(bg_row), Some(trans_idx)) = (bg_row, transparent_index) {
+                let bg_px = bg_row[x];
+                if bg_px.a > 128 {
+                    let dithered_color = palette[dithered_idx as usize];
+                    let dither_diff = color_diff_rgb(px, dithered_color);
+                    let bg_diff = color_diff_rgb(px, bg_px);
+                    if bg_diff <= dither_diff {
+                        final_idx = trans_idx;
+                    }
+                }
+            }
+
+            out_row[x] = final_idx;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use imgref::Img;
+    use rgb::RGBA8;
+
+    #[test]
+    fn test_dither_color_flat_area_low_dither_no_stray_pixels() {
+        let px = RGBA8::new(100, 100, 100, 255);
+        let img_data = vec![px; 32 * 32];
+        let img = Img::new(img_data, 32, 32);
+
+        let palette = vec![
+            RGBA8::new(0, 0, 0, 255),
+            RGBA8::new(97, 97, 97, 255),
+            RGBA8::new(105, 105, 105, 255),
+            RGBA8::new(255, 255, 255, 255),
+        ];
+
+        for algo in [
+            Dithering::Bayer2,
+            Dithering::Bayer4,
+            Dithering::Bayer8,
+            Dithering::Blue16,
+            Dithering::Blue32,
+            Dithering::Blue64,
+        ] {
+            let matrix = DitherMatrix::for_algorithm(algo).unwrap();
+            let mut out = vec![0u8; 32 * 32];
+
+            // At dithering_level = 0.1, flat area must have zero stray pixels: all pixels map to nearest neighbor (1)
+            dither_color(img.as_ref(), &palette, matrix, 0.1, None, &mut out);
+            assert!(
+                out.iter().all(|&idx| idx == 1),
+                "flat area at dithering_level 0.1 with {:?} produced stray pixels",
+                algo
+            );
+
+            // At dithering_level = 0.0, all pixels must map to nearest neighbor (1)
+            dither_color(img.as_ref(), &palette, matrix, 0.0, None, &mut out);
+            assert!(
+                out.iter().all(|&idx| idx == 1),
+                "flat area at dithering_level 0.0 with {:?} produced stray pixels",
+                algo
+            );
+        }
+    }
+}
