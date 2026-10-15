@@ -4,7 +4,7 @@ use std::io;
 use std::os::raw::c_int;
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, strum::FromRepr)]
 #[allow(non_camel_case_types)]
 #[allow(clippy::upper_case_acronyms)]
 pub enum GifskiError {
@@ -49,25 +49,7 @@ impl From<GifskiError> for io::Error {
 impl From<c_int> for GifskiError {
     #[cold]
     fn from(res: c_int) -> Self {
-        use GifskiError::*;
-        match res {
-            x if x == OK as c_int => OK,
-            x if x == NULL_ARG as c_int => NULL_ARG,
-            x if x == INVALID_STATE as c_int => INVALID_STATE,
-            x if x == QUANT as c_int => QUANT,
-            x if x == GIF as c_int => GIF,
-            x if x == THREAD_LOST as c_int => THREAD_LOST,
-            x if x == NOT_FOUND as c_int => NOT_FOUND,
-            x if x == PERMISSION_DENIED as c_int => PERMISSION_DENIED,
-            x if x == ALREADY_EXISTS as c_int => ALREADY_EXISTS,
-            x if x == INVALID_INPUT as c_int => INVALID_INPUT,
-            x if x == TIMED_OUT as c_int => TIMED_OUT,
-            x if x == WRITE_ZERO as c_int => WRITE_ZERO,
-            x if x == INTERRUPTED as c_int => INTERRUPTED,
-            x if x == UNEXPECTED_EOF as c_int => UNEXPECTED_EOF,
-            x if x == ABORTED as c_int => ABORTED,
-            _ => OTHER,
-        }
+        usize::try_from(res).ok().and_then(Self::from_repr).unwrap_or(Self::OTHER)
     }
 }
 

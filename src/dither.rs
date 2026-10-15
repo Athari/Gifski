@@ -7,6 +7,7 @@
 use crate::Dithering;
 use imgref::ImgRef;
 use rgb::RGBA8;
+use smart_default::SmartDefault;
 
 #[derive(Copy, Clone, Debug)]
 pub struct DitherMatrix {
@@ -539,19 +540,11 @@ impl KdTree {
 
 const CANDIDATE_CACHE_SIZE: usize = 65536;
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, SmartDefault)]
 struct CandidateCacheEntry {
+    #[default(u32::MAX)]
     key: u32,
     candidates: [u8; 16],
-}
-
-impl Default for CandidateCacheEntry {
-    fn default() -> Self {
-        Self {
-            key: u32::MAX,
-            candidates: [0u8; 16],
-        }
-    }
 }
 
 /// Context storing precomputed palette structures and candidate cache across frames.

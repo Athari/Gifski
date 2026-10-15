@@ -1,49 +1,57 @@
 use crate::WrongSizeError;
-use quick_error::quick_error;
 use std::io;
 use std::num::TryFromIntError;
 
-quick_error! {
-    #[derive(Debug)]
-    pub enum Error {
-        /// Internal error
-        ThreadSend {
-            display("Internal error; unexpectedly aborted")
-        }
-        Aborted {
-            display("aborted")
-        }
-        Gifsicle {
-            display("gifsicle failure")
-        }
-        Gif(err: gif::EncodingError) {
-            display("GIF encoding error: {}", err)
-        }
-        NoFrames {
-            display("Found no usable frames to encode")
-        }
-        Io(err: io::Error) {
-            from()
-            from(_oom: std::collections::TryReserveError) -> (io::ErrorKind::OutOfMemory.into())
-            display("I/O: {}", err)
-        }
-        PNG(msg: String) {
-            display("{}", msg)
-        }
-        WrongSize(msg: String) {
-            display("{}", msg)
-            from(e: TryFromIntError) -> (e.to_string())
-            from(_e: WrongSizeError) -> ("wrong size".to_string())
-            from(e: resize::Error) -> (e.to_string())
-        }
-        Quant(liq: imagequant::liq_error) {
-            from()
-            display("pngquant error: {}", liq)
-        }
-        Pal(gif: gif_dispose::Error) {
-            from()
-            display("gif dispose error: {}", gif)
-        }
+#[derive(thiserror::Error, Debug)]
+pub enum Error {
+    /// Internal error
+    #[error("Internal error; unexpectedly aborted")]
+    ThreadSend,
+    #[error("aborted")]
+    Aborted,
+    #[error("gifsicle failure")]
+    Gifsicle,
+    #[error("GIF encoding error: {0}")]
+    Gif(gif::EncodingError),
+    #[error("Found no usable frames to encode")]
+    NoFrames,
+    #[error("I/O: {0}")]
+    Io(#[from] io::Error),
+    #[error("{0}")]
+    PNG(String),
+    #[error("{0}")]
+    WrongSize(String),
+    #[error("pngquant error: {0}")]
+    Quant(#[from] imagequant::liq_error),
+    #[error("gif dispose error: {0}")]
+    Pal(#[from] gif_dispose::Error),
+}
+
+impl From<TryFromIntError> for Error {
+    #[cold]
+    fn from(e: TryFromIntError) -> Self {
+        Self::WrongSize(e.to_string())
+    }
+}
+
+impl From<WrongSizeError> for Error {
+    #[cold]
+    fn from(_: WrongSizeError) -> Self {
+        Self::WrongSize("wrong size".to_string())
+    }
+}
+
+impl From<resize::Error> for Error {
+    #[cold]
+    fn from(e: resize::Error) -> Self {
+        Self::WrongSize(e.to_string())
+    }
+}
+
+impl From<std::collections::TryReserveError> for Error {
+    #[cold]
+    fn from(_: std::collections::TryReserveError) -> Self {
+        Self::Io(io::ErrorKind::OutOfMemory.into())
     }
 }
 

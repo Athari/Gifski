@@ -62,6 +62,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 mod c_api_error;
 use self::c_api_error::GifskiError;
 use std::panic::catch_unwind;
+use smart_default::SmartDefault;
 
 pub const GIFSKI_SETTINGS_MATTE: u32 = 1 << 0;
 pub const GIFSKI_SETTINGS_DITHERING_LEVEL: u32 = 1 << 1;
@@ -113,7 +114,7 @@ impl GifskiDithering {
 
 /// Settings for creating a new encoder instance. See `gifski_new`
 #[repr(C)]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, SmartDefault)]
 pub struct GifskiSettings {
     /// Bitmask of optional settings (`GIFSKI_SETTINGS_*`).
     pub mask: u32,
@@ -122,6 +123,7 @@ pub struct GifskiSettings {
     /// Resize to max this height if width is non-0. Note that aspect ratio is not preserved.
     pub height: u32,
     /// 1-100, but useful range is 50-100. Recommended to set to 90.
+    #[default = 90]
     pub quality: u8,
     /// Quality 1-100 of temporal denoising. Lower values reduce motion. 0 defaults to `quality`.
     pub motion_quality: u8,
@@ -134,8 +136,10 @@ pub struct GifskiSettings {
     /// If negative, looping is disabled. The number of times the sequence is repeated. 0 to loop forever.
     pub repeat: i16,
     /// Background color for semitransparent pixels when `GIFSKI_SETTINGS_MATTE` is set in `mask`.
+    #[default(RGB8::new(0, 0, 0))]
     pub matte: RGB8,
     /// Array of colors to always keep in the palette, or NULL.
+    #[default(ptr::null())]
     pub fixed_colors: *const RGB8,
     /// Number of colors in `fixed_colors` (max 255).
     pub num_fixed_colors: u32,
@@ -150,38 +154,13 @@ pub struct GifskiSettings {
     /// Dithering algorithm or matrix used for colors: see `GifskiDithering`. 0 (`GIFSKI_DITHERING_DEFAULT`) defaults to `GIFSKI_DITHERING_FLOYD_STEINBERG`.
     pub color_dithering: GifskiDithering,
     /// Minimum threshold for alpha dithering (0-255) when `GIFSKI_SETTINGS_ALPHA_THRESHOLDS` is set in `mask`.
+    #[default = 8]
     pub alpha_low: u8,
     /// Maximum threshold for alpha dithering (0-255) when `GIFSKI_SETTINGS_ALPHA_THRESHOLDS` is set in `mask`.
+    #[default = 134]
     pub alpha_high: u8,
     /// Anti-aliased edges and non-dithered threshold (0-255, 0 = default) when `GIFSKI_SETTINGS_ALPHA_THRESHOLDS` is set in `mask`.
     pub alpha_mid: u8,
-}
-
-impl Default for GifskiSettings {
-    fn default() -> Self {
-        Self {
-            mask: 0,
-            width: 0,
-            height: 0,
-            quality: 90,
-            motion_quality: 0,
-            lossy_quality: 0,
-            speed: GifskiSpeed::Default,
-            global_palette: false,
-            repeat: 0,
-            matte: RGB8::new(0, 0, 0),
-            fixed_colors: ptr::null(),
-            num_fixed_colors: 0,
-            max_colors: 0,
-            dithering_level: 0.0,
-            max_pixels: 0,
-            alpha_dithering: GifskiDithering::Default,
-            color_dithering: GifskiDithering::Default,
-            alpha_low: 8,
-            alpha_high: 134,
-            alpha_mid: 0,
-        }
-    }
 }
 
 #[repr(C)]

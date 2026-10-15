@@ -78,6 +78,8 @@ pub use wasm::GifskiWasm;
 mod dither;
 use dither::*;
 
+use smart_default::SmartDefault;
+
 /// Number of repetitions
 pub type Repeat = gif::Repeat;
 
@@ -89,6 +91,21 @@ impl Speed {
     pub const SLOW: Self = Self(1);
     pub const MEDIUM: Self = Self(4);
     pub const FAST: Self = Self(10);
+}
+
+impl std::ops::Deref for Speed {
+    type Target = u8;
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl From<u8> for Speed {
+    #[inline]
+    fn from(val: u8) -> Self {
+        Self(val)
+    }
 }
 
 /// Dithering algorithm or matrix.
@@ -129,21 +146,24 @@ impl Dithering {
 }
 
 /// Encoding settings for the `new()` function
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, SmartDefault)]
 pub struct Settings {
     /// Resize to max this width if non-0.
     pub width: Option<u32>,
     /// Resize to max this height if width is non-0. Note that aspect ratio is not preserved.
     pub height: Option<u32>,
     /// 1-100, but useful range is 50-100. Recommended to set to 100.
+    #[default = 100]
     pub quality: u8,
     /// Quality 1-100 of temporal denoising. Lower values reduce motion. `None` defaults to `quality`.
     pub motion_quality: Option<u8>,
     /// Quality 1-100 of gifsicle compression. Lower values add noise. `None` defaults to `quality`.
     pub lossy_quality: Option<u8>,
     /// Encoding speed: Speed::SLOW, Speed::MEDIUM, Speed::FAST, or Speed(1-10). Defaults to Speed::MEDIUM.
+    #[default(Speed::MEDIUM)]
     pub speed: Speed,
     /// Sets the looping method for the image sequence.
+    #[default(Repeat::Infinite)]
     pub repeat: Repeat,
     /// Use a single global palette for all frames instead of per-frame palettes.
     pub global_palette: bool,
@@ -158,12 +178,16 @@ pub struct Settings {
     /// Maximum number of pixels before auto-downscaling triggers. `None` disables downscaling (keeps original resolution).
     pub max_pixels: Option<u32>,
     /// Dithering matrix used for semi-transparent alpha. Defaults to `Dithering::Blue32`.
+    #[default(Dithering::Blue32)]
     pub alpha_dithering: Dithering,
     /// Dithering algorithm or matrix used for colors. Defaults to `Dithering::FloydSteinberg`.
+    #[default(Dithering::FloydSteinberg)]
     pub color_dithering: Dithering,
     /// Minimum alpha threshold below which pixels become transparent (0-255). Defaults to 8.
+    #[default = 8]
     pub alpha_low: u8,
     /// Maximum alpha threshold at or above which pixels become opaque (0-255). Defaults to 134.
+    #[default = 134]
     pub alpha_high: u8,
     /// Threshold used for anti-aliased edges and non-dithered alpha (0-255). `None` defaults to `low + (high - low) / 3 * 2` (92 with defaults).
     pub alpha_mid: Option<u8>,
@@ -218,14 +242,14 @@ impl Settings {
     #[must_use]
     #[inline]
     pub fn fast(&self) -> bool {
-        self.speed.0 >= 10
+        *self.speed >= 10
     }
 
     /// Returns true if encoding speed is slow (speed <= 1).
     #[must_use]
     #[inline]
     pub fn slow(&self) -> bool {
-        self.speed.0 <= 1
+        *self.speed <= 1
     }
 
     /// `add_frame` is going to resize the images to this size.
@@ -233,31 +257,6 @@ impl Settings {
     #[inline]
     pub fn dimensions_for_image(&self, width: usize, height: usize) -> (usize, usize) {
         dimensions_for_image((width, height), (self.width, self.height), self.max_pixels)
-    }
-}
-
-impl Default for Settings {
-    #[inline]
-    fn default() -> Self {
-        Self {
-            width: None, height: None,
-            quality: 100,
-            motion_quality: None,
-            lossy_quality: None,
-            speed: Speed::MEDIUM,
-            repeat: Repeat::Infinite,
-            global_palette: false,
-            matte: None,
-            fixed_colors: Vec::new(),
-            max_colors: None,
-            dithering_level: None,
-            max_pixels: None,
-            alpha_dithering: Dithering::Blue32,
-            color_dithering: Dithering::FloydSteinberg,
-            alpha_low: 8,
-            alpha_high: 134,
-            alpha_mid: None,
-        }
     }
 }
 
