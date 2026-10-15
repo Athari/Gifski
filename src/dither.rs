@@ -407,35 +407,152 @@ fn color_diff_rgb(c1: RGBA8, c2: RGBA8) -> u32 {
     ((dr * dr * 299 + dg * dg * 587 + db * db * 114) * 3 / 4000 + dl * dl) as u32
 }
 
-#[inline(always)]
-fn color_diff_f32(r: f32, g: f32, b: f32, c2: RGBA8) -> f32 {
-    let dr = r - c2.r as f32;
-    let dg = g - c2.g as f32;
-    let db = b - c2.b as f32;
-    let l1 = (r * 299.0 + g * 587.0 + b * 114.0) * (1.0 / 1000.0);
-    let l2 = (c2.r as f32 * 299.0 + c2.g as f32 * 587.0 + c2.b as f32 * 114.0) * (1.0 / 1000.0);
-    let dl = l1 - l2;
-    (dr * dr * 0.299 + dg * dg * 0.587 + db * db * 0.114) * 0.75 + dl * dl
+#[derive(Copy, Clone)]
+struct PaletteColor {
+    idx: u8,
+    color: RGBA8,
+    r: f32,
+    g: f32,
+    b: f32,
+    luma: f32,
 }
 
-#[inline(always)]
-fn find_nearest(candidate_palette: &[(u8, RGBA8)], r: f32, g: f32, b: f32) -> (u8, RGBA8) {
-    let mut best_diff = f32::MAX;
-    let mut best_idx = candidate_palette[0].0;
-    let mut best_color = candidate_palette[0].1;
-    for &(idx, color) in candidate_palette {
-        let diff = color_diff_f32(r, g, b, color);
-        if diff < best_diff {
-            best_diff = diff;
-            best_idx = idx;
-            best_color = color;
+impl PaletteColor {
+    #[inline(always)]
+    fn new(idx: u8, color: RGBA8) -> Self {
+        let r = color.r as f32;
+        let g = color.g as f32;
+        let b = color.b as f32;
+        let luma = (r * 299.0 + g * 587.0 + b * 114.0) * 0.001;
+        Self { idx, color, r, g, b, luma }
+    }
+}
+
+#[derive(Copy, Clone)]
+struct KdNode {
+    pal: PaletteColor,
+    axis: u8,
+    left: u16,
+    right: u16,
+}
+
+struct KdTree {
+    nodes: Vec<KdNode>,
+    root: u16,
+}
+
+impl KdTree {
+    fn build(mut colors: Vec<PaletteColor>) -> Self {
+        let mut nodes = Vec::with_capacity(colors.len());
+        let root = Self::build_subtree(&mut colors, 0, &mut nodes);
+        Self { nodes, root }
+    }
+
+    fn build_subtree(colors: &mut [PaletteColor], depth: usize, nodes: &mut Vec<KdNode>) -> u16 {
+        if colors.is_empty() {
+            return u16::MAX;
+        }
+
+        let axis = (depth % 3) as u8;
+        match axis {
+            0 => colors.sort_unstable_by(|a, b| a.r.total_cmp(&b.r)),
+            1 => colors.sort_unstable_by(|a, b| a.g.total_cmp(&b.g)),
+            _ => colors.sort_unstable_by(|a, b| a.b.total_cmp(&b.b)),
+        }
+
+        let mid = colors.len() / 2;
+        let pal = colors[mid];
+        let node_idx = nodes.len() as u16;
+
+        nodes.push(KdNode { pal, axis, left: u16::MAX, right: u16::MAX });
+
+        let left = Self::build_subtree(&mut colors[..mid], depth + 1, nodes);
+        let right = Self::build_subtree(&mut colors[mid + 1..], depth + 1, nodes);
+
+        nodes[node_idx as usize].left = left;
+        nodes[node_idx as usize].right = right;
+
+        node_idx
+    }
+
+    #[inline(always)]
+    fn find_nearest(&self, r: f32, g: f32, b: f32) -> (u8, RGBA8) {
+        if self.nodes.is_empty() {
+            return (0, RGBA8::new(0, 0, 0, 255));
+        }
+
+        let query_luma = (r * 299.0 + g * 587.0 + b * 114.0) * 0.001;
+        let mut best_diff = f32::MAX;
+        let mut best_idx = self.nodes[0].pal.idx;
+        let mut best_color = self.nodes[0].pal.color;
+
+        let mut stack = [0u16; 32];
+        let mut stack_top = 0;
+        stack[0] = self.root;
+        stack_top += 1;
+
+        while stack_top > 0 {
+            stack_top -= 1;
+            let curr = stack[stack_top];
+            if curr == u16::MAX {
+                continue;
+            }
+            let node = &self.nodes[curr as usize];
+
+            let dr = r - node.pal.r;
+            let dg = g - node.pal.g;
+            let db = b - node.pal.b;
+            let dl = query_luma - node.pal.luma;
+            let diff = (dr * dr * 0.299 + dg * dg * 0.587 + db * db * 0.114) * 0.75 + dl * dl;
+
+            if diff < best_diff {
+                best_diff = diff;
+                best_idx = node.pal.idx;
+                best_color = node.pal.color;
+            }
+
+            let (delta, axis_weight) = match node.axis {
+                0 => (dr, 0.22425f32),
+                1 => (dg, 0.44025f32),
+                _ => (db, 0.0855f32),
+            };
+
+            let (closer, farther) = if delta <= 0.0 {
+                (node.left, node.right)
+            } else {
+                (node.right, node.left)
+            };
+
+            if farther != u16::MAX && (delta * delta * axis_weight) < best_diff {
+                stack[stack_top] = farther;
+                stack_top += 1;
+            }
+            if closer != u16::MAX {
+                stack[stack_top] = closer;
+                stack_top += 1;
+            }
+        }
+
+        (best_idx, best_color)
+    }
+}
+
+const CANDIDATE_CACHE_SIZE: usize = 8192;
+
+#[derive(Copy, Clone)]
+struct CandidateCacheEntry {
+    key: u32,
+    candidates: [u8; 16],
+}
+
+impl Default for CandidateCacheEntry {
+    fn default() -> Self {
+        Self {
+            key: u32::MAX,
+            candidates: [0u8; 16],
         }
     }
-    (best_idx, best_color)
 }
-
-/// When true, contracts matrix candidate sampling towards the nearest palette color
-/// proportional to `dithering_level`, eliminating stray dither noise in flat areas.
 
 /// Dither colors using Thomas Knoll's pattern dithering (local error feedback).
 #[inline(never)]
@@ -465,6 +582,9 @@ pub fn dither_color(
         }
     }
 
+    let fast_palette: Vec<PaletteColor> = opaque_palette.iter().map(|&(idx, color)| PaletteColor::new(idx, color)).collect();
+    let kd_tree = KdTree::build(fast_palette);
+
     let mut palette_luma = [0u32; 256];
     for (i, p) in palette.iter().enumerate() {
         palette_luma[i] = p.r as u32 * 299 + p.g as u32 * 587 + p.b as u32 * 114;
@@ -472,17 +592,15 @@ pub fn dither_color(
 
     // Number of candidate colors per pixel. Thomas Knoll's pattern dithering algorithm
     // was originally designed for a 4x4 Bayer matrix using 16 candidates. For larger matrices
-    // (e.g. 8x8 or 32x32 blue noise), candidate generation without spatial acceleration is O(K * |palette|),
-    // so K is capped at 16 to avoid severe performance degradation.
+    // (e.g. 8x8 or 32x32 blue noise), candidate generation is capped at 16 to avoid performance degradation.
     let k = (matrix.width * matrix.height).min(16);
-
-    let err_multiplier = dithering_level;
-    let error_decay = dithering_level;
 
     let x_mask = matrix.width - 1;
     let y_mask = matrix.height - 1;
     let m_width = matrix.width;
     let max_val = matrix.max_val as usize;
+
+    let mut candidate_cache = vec![CandidateCacheEntry::default(); CANDIDATE_CACHE_SIZE];
 
     for y in 0..height {
         let img_row = &image.buf()[y * image.stride()..y * image.stride() + width];
@@ -503,28 +621,39 @@ pub fn dither_color(
 
             if prev_px != Some(px) {
                 prev_px = Some(px);
-                let px_r = px.r as f32;
-                let px_g = px.g as f32;
-                let px_b = px.b as f32;
 
-                if dithering_level == 0.0 {
-                    let (nearest_idx, _) = find_nearest(&opaque_palette, px_r, px_g, px_b);
-                    candidates[..k].fill(nearest_idx);
+                let key = (px.r as u32) | ((px.g as u32) << 8) | ((px.b as u32) << 16);
+                let cache_idx = ((key.wrapping_mul(0x9E3779B9)) >> 19) as usize & (CANDIDATE_CACHE_SIZE - 1);
+
+                if candidate_cache[cache_idx].key == key {
+                    candidates[..k].copy_from_slice(&candidate_cache[cache_idx].candidates[..k]);
                 } else {
-                    let mut err_r = 0.0f32;
-                    let mut err_g = 0.0f32;
-                    let mut err_b = 0.0f32;
-                    for cand in candidates[..k].iter_mut() {
-                        let tr = (px_r + err_r * err_multiplier).clamp(0.0, 255.0);
-                        let tg = (px_g + err_g * err_multiplier).clamp(0.0, 255.0);
-                        let tb = (px_b + err_b * err_multiplier).clamp(0.0, 255.0);
-                        let (chosen_idx, chosen_color) = find_nearest(&opaque_palette, tr, tg, tb);
-                        *cand = chosen_idx;
-                        err_r = err_r * error_decay + (px_r - chosen_color.r as f32);
-                        err_g = err_g * error_decay + (px_g - chosen_color.g as f32);
-                        err_b = err_b * error_decay + (px_b - chosen_color.b as f32);
+                    let px_r = px.r as f32;
+                    let px_g = px.g as f32;
+                    let px_b = px.b as f32;
+
+                    if dithering_level == 0.0 {
+                        let (nearest_idx, _) = kd_tree.find_nearest(px_r, px_g, px_b);
+                        candidates[..k].fill(nearest_idx);
+                    } else {
+                        let mut err_r = 0.0f32;
+                        let mut err_g = 0.0f32;
+                        let mut err_b = 0.0f32;
+                        for cand in candidates[..k].iter_mut() {
+                            let tr = (px_r + err_r).clamp(0.0, 255.0);
+                            let tg = (px_g + err_g).clamp(0.0, 255.0);
+                            let tb = (px_b + err_b).clamp(0.0, 255.0);
+                            let (chosen_idx, chosen_color) = kd_tree.find_nearest(tr, tg, tb);
+                            *cand = chosen_idx;
+                            err_r = (err_r + (px_r - chosen_color.r as f32)) * dithering_level;
+                            err_g = (err_g + (px_g - chosen_color.g as f32)) * dithering_level;
+                            err_b = (err_b + (px_b - chosen_color.b as f32)) * dithering_level;
+                        }
+                        candidates[..k].sort_unstable_by_key(|&idx| palette_luma[idx as usize]);
                     }
-                    candidates[..k].sort_unstable_by_key(|&idx| palette_luma[idx as usize]);
+
+                    candidate_cache[cache_idx].key = key;
+                    candidate_cache[cache_idx].candidates[..k].copy_from_slice(&candidates[..k]);
                 }
             }
 
@@ -573,14 +702,7 @@ mod tests {
             RGBA8::new(255, 255, 255, 255),
         ];
 
-        for algo in [
-            Dithering::Bayer2,
-            Dithering::Bayer4,
-            Dithering::Bayer8,
-            Dithering::Blue16,
-            Dithering::Blue32,
-            Dithering::Blue64,
-        ] {
+        for algo in [Dithering::Bayer2, Dithering::Bayer4, Dithering::Bayer8, Dithering::Blue16, Dithering::Blue32, Dithering::Blue64] {
             let matrix = DitherMatrix::for_algorithm(algo).unwrap();
             let mut out = vec![0u8; 32 * 32];
 
