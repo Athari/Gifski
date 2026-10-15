@@ -537,7 +537,7 @@ impl KdTree {
     }
 }
 
-const CANDIDATE_CACHE_SIZE: usize = 8192;
+const CANDIDATE_CACHE_SIZE: usize = 65536;
 
 #[derive(Copy, Clone)]
 struct CandidateCacheEntry {
@@ -554,6 +554,36 @@ impl Default for CandidateCacheEntry {
     }
 }
 
+/// Context storing precomputed palette structures and candidate cache across frames.
+pub struct DitherColorContext {
+    kd_tree: Option<KdTree>,
+    palette_luma: [u32; 256],
+    candidate_cache: Vec<CandidateCacheEntry>,
+    palette: Vec<RGBA8>,
+    k: usize,
+    dithering_level: f32,
+}
+
+impl Default for DitherColorContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DitherColorContext {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            kd_tree: None,
+            palette_luma: [0; 256],
+            candidate_cache: vec![CandidateCacheEntry::default(); CANDIDATE_CACHE_SIZE],
+            palette: Vec::new(),
+            k: 0,
+            dithering_level: -1.0,
+        }
+    }
+}
+
 /// Dither colors using Thomas Knoll's pattern dithering (local error feedback).
 #[inline(never)]
 pub fn dither_color(
@@ -564,43 +594,51 @@ pub fn dither_color(
     exact_match: bool,
     background: Option<ImgRef<RGBA8>>,
     out: &mut [u8],
+    context: &mut DitherColorContext,
 ) {
     let width = image.width();
     let height = image.height();
 
     let transparent_index = palette.iter().position(|p| p.a <= 128).map(|i| i as u8);
 
-    let mut opaque_palette = Vec::with_capacity(palette.len());
-    for (i, &p) in palette.iter().enumerate() {
-        if p.a > 128 {
-            opaque_palette.push((i as u8, p));
-        }
-    }
-    if opaque_palette.is_empty() {
-        for (i, &p) in palette.iter().enumerate() {
-            opaque_palette.push((i as u8, p));
-        }
-    }
-
-    let fast_palette: Vec<PaletteColor> = opaque_palette.iter().map(|&(idx, color)| PaletteColor::new(idx, color)).collect();
-    let kd_tree = KdTree::build(fast_palette);
-
-    let mut palette_luma = [0u32; 256];
-    for (i, p) in palette.iter().enumerate() {
-        palette_luma[i] = p.r as u32 * 299 + p.g as u32 * 587 + p.b as u32 * 114;
-    }
-
     // Number of candidate colors per pixel. Thomas Knoll's pattern dithering algorithm
     // was originally designed for a 4x4 Bayer matrix using 16 candidates. For larger matrices
     // (e.g. 8x8 or 32x32 blue noise), candidate generation is capped at 16 to avoid performance degradation.
     let k = (matrix.width * matrix.height).min(16);
 
+    if context.palette != palette || context.k != k || context.dithering_level != dithering_level {
+        context.palette = palette.to_vec();
+        context.k = k;
+        context.dithering_level = dithering_level;
+
+        let mut opaque_palette = Vec::with_capacity(palette.len());
+        for (i, &p) in palette.iter().enumerate() {
+            if p.a > 128 {
+                opaque_palette.push((i as u8, p));
+            }
+        }
+        if opaque_palette.is_empty() {
+            for (i, &p) in palette.iter().enumerate() {
+                opaque_palette.push((i as u8, p));
+            }
+        }
+
+        let fast_palette: Vec<PaletteColor> = opaque_palette.iter().map(|&(idx, color)| PaletteColor::new(idx, color)).collect();
+        context.kd_tree = Some(KdTree::build(fast_palette));
+        for (i, p) in palette.iter().enumerate() {
+            context.palette_luma[i] = p.r as u32 * 299 + p.g as u32 * 587 + p.b as u32 * 114;
+        }
+        context.candidate_cache.fill(CandidateCacheEntry::default());
+    }
+
+    let kd_tree = context.kd_tree.as_ref().unwrap();
+    let palette_luma = &context.palette_luma;
+    let candidate_cache = &mut context.candidate_cache;
+
     let x_mask = matrix.width - 1;
     let y_mask = matrix.height - 1;
     let m_width = matrix.width;
     let max_val = matrix.max_val as usize;
-
-    let mut candidate_cache = vec![CandidateCacheEntry::default(); CANDIDATE_CACHE_SIZE];
 
     for y in 0..height {
         let img_row = &image.buf()[y * image.stride()..y * image.stride() + width];
@@ -623,7 +661,7 @@ pub fn dither_color(
                 prev_px = Some(px);
 
                 let key = (px.r as u32) | ((px.g as u32) << 8) | ((px.b as u32) << 16);
-                let cache_idx = ((key.wrapping_mul(0x9E3779B9)) >> 19) as usize & (CANDIDATE_CACHE_SIZE - 1);
+                let cache_idx = ((key.wrapping_mul(0x9E3779B9)) >> 16) as usize & (CANDIDATE_CACHE_SIZE - 1);
 
                 if candidate_cache[cache_idx].key == key {
                     candidates[..k].copy_from_slice(&candidate_cache[cache_idx].candidates[..k]);
@@ -694,20 +732,20 @@ mod tests {
         let px = RGBA8::new(100, 100, 100, 255);
         let img_data = vec![px; 32 * 32];
         let img = Img::new(img_data, 32, 32);
-
         let palette = vec![
             RGBA8::new(0, 0, 0, 255),
             RGBA8::new(97, 97, 97, 255),
             RGBA8::new(105, 105, 105, 255),
             RGBA8::new(255, 255, 255, 255),
         ];
+        let mut ctx = DitherColorContext::new();
 
         for algo in [Dithering::Bayer2, Dithering::Bayer4, Dithering::Bayer8, Dithering::Blue16, Dithering::Blue32, Dithering::Blue64] {
             let matrix = DitherMatrix::for_algorithm(algo).unwrap();
             let mut out = vec![0u8; 32 * 32];
 
             // At dithering_level = 0.1, flat area must have zero stray pixels: all pixels map to nearest neighbor (1)
-            dither_color(img.as_ref(), &palette, matrix, 0.1, true, None, &mut out);
+            dither_color(img.as_ref(), &palette, matrix, 0.1, true, None, &mut out, &mut ctx);
             assert!(
                 out.iter().all(|&idx| idx == 1),
                 "flat area at dithering_level 0.1 with {:?} produced stray pixels",
@@ -715,7 +753,7 @@ mod tests {
             );
 
             // At dithering_level = 0.0, all pixels must map to nearest neighbor (1)
-            dither_color(img.as_ref(), &palette, matrix, 0.0, true, None, &mut out);
+            dither_color(img.as_ref(), &palette, matrix, 0.0, true, None, &mut out, &mut ctx);
             assert!(
                 out.iter().all(|&idx| idx == 1),
                 "flat area at dithering_level 0.0 with {:?} produced stray pixels",
@@ -744,10 +782,11 @@ mod tests {
 
         let matrix = DitherMatrix::for_algorithm(Dithering::Bayer2).unwrap();
         let mut out = vec![0u8; 4 * 4];
+        let mut ctx = DitherColorContext::new();
 
         // When exact_match is false (e.g. motion_quality < 100), perceptual check bg_diff <= dither_diff
         // forces all pixels to 0 (transparent) because bg_px (98) is closer to px (102) than dithered_color (110).
-        dither_color(img.as_ref(), &palette, matrix, 1.0, false, Some(bg.as_ref()), &mut out);
+        dither_color(img.as_ref(), &palette, matrix, 1.0, false, Some(bg.as_ref()), &mut out, &mut ctx);
         assert!(
             out.iter().all(|&idx| idx == 0),
             "when exact_match is false, perceptual check should reuse background for all pixels"
@@ -755,7 +794,7 @@ mod tests {
 
         // When exact_match is true (motion_quality == 100), exact match is required:
         // pixels that dither to color B (2) must NOT be suppressed into transparent (0).
-        dither_color(img.as_ref(), &palette, matrix, 1.0, true, Some(bg.as_ref()), &mut out);
+        dither_color(img.as_ref(), &palette, matrix, 1.0, true, Some(bg.as_ref()), &mut out, &mut ctx);
         assert!(
             out.contains(&2),
             "when exact_match is true, pixels dithering to color B must not be smeared into transparent"
@@ -766,7 +805,7 @@ mod tests {
         let bg_matching_data = vec![RGBA8::new(110, 110, 110, 255); 4 * 4];
         let bg_matching = Img::new(bg_matching_data, 4, 4);
         let mut out_matching = vec![0u8; 4 * 4];
-        dither_color(img.as_ref(), &palette, matrix, 1.0, true, Some(bg_matching.as_ref()), &mut out_matching);
+        dither_color(img.as_ref(), &palette, matrix, 1.0, true, Some(bg_matching.as_ref()), &mut out_matching, &mut ctx);
         for i in 0..16 {
             if out[i] == 2 {
                 assert_eq!(out_matching[i], 0, "identical output pixel must be marked transparent");

@@ -673,7 +673,7 @@ impl Writer {
         Ok((liq, res, img, out))
     }
 
-    fn remap<'a>(&self, liq: Attributes, mut res: QuantizationResult, mut img: Image<'a>, background: Option<ImgRef<'a, RGBA8>>, mut pal_img: Vec<u8>, source_image: Option<ImgVec<RGBA8>>) -> CatResult<(ImgVec<u8>, Vec<RGBA8>)> {
+    fn remap<'a>(&self, liq: Attributes, mut res: QuantizationResult, mut img: Image<'a>, background: Option<ImgRef<'a, RGBA8>>, mut pal_img: Vec<u8>, source_image: Option<ImgVec<RGBA8>>, dither_context: &mut DitherColorContext) -> CatResult<(ImgVec<u8>, Vec<RGBA8>)> {
         let (width, height) = (img.width(), img.height());
         if let Some(matrix) = DitherMatrix::for_algorithm(self.settings.color_dithering) {
             let pal = res.palette_vec();
@@ -688,6 +688,7 @@ impl Writer {
                 exact_match,
                 background,
                 &mut pal_img,
+                dither_context,
             );
             Ok((Img::new(pal_img, width, height), pal))
         } else {
@@ -1105,6 +1106,7 @@ impl Writer {
         #[cfg(debug_assertions)]
         let mut debug_screen = gif_dispose::Screen::new(first_frame.liq_image.width(), first_frame.liq_image.height(), None);
 
+        let mut dither_context = DitherColorContext::new();
         let mut next_frame = Some(first_frame);
         while let Some(RemapMessage {ordinal_frame_number, end_pts, dispose, liq, remap, liq_image, out_buf, has_next_frame, source_image}) = next_frame {
             let pixels = screen.pixels_rgba();
@@ -1114,7 +1116,7 @@ impl Writer {
 
             let (mut image8, image8_pal) = {
                 let bg = if frame_index != 0 { Some(screen_after_dispose.pixels_rgba()) } else { None };
-                self.remap(liq, remap, liq_image, bg, out_buf, source_image)?
+                self.remap(liq, remap, liq_image, bg, out_buf, source_image, &mut dither_context)?
             };
 
             let (image8_pal, transparent_index) = transparent_index_from_palette(image8_pal, image8.as_mut());
