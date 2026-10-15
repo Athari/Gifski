@@ -1,7 +1,8 @@
-use gifski::{Settings, new, progress};
+use gifski::{Dithering, Settings, new, progress};
 use imgref::{ImgRef, ImgRefMut, ImgVec};
 use rgb::{ComponentMap, RGBA8};
 use std::path::{Path, PathBuf};
+use strum::IntoEnumIterator;
 
 #[test]
 fn n_frames() {
@@ -492,47 +493,20 @@ fn alpha_dithering_validation() {
     assert!(new(Settings { alpha_low: 50, alpha_high: 100, alpha_mid: Some(75), ..Settings::default() }).is_ok());
 
     // All valid alpha enum variants succeed, FloydSteinberg fails
-    for algo in [
-        Dithering::None,
-        Dithering::Bayer2,
-        Dithering::Bayer4,
-        Dithering::Bayer8,
-        Dithering::Blue16,
-        Dithering::Blue32,
-        Dithering::Blue64,
-    ] {
+    for algo in Dithering::iter().filter(|d| !d.is_error_diffusion()) {
         assert!(new(Settings { alpha_dithering: algo, ..Settings::default() }).is_ok());
     }
     assert!(new(Settings { alpha_dithering: Dithering::FloydSteinberg, ..Settings::default() }).is_err());
 
     // All color enum variants succeed
-    for algo in [
-        Dithering::None,
-        Dithering::FloydSteinberg,
-        Dithering::Bayer2,
-        Dithering::Bayer4,
-        Dithering::Bayer8,
-        Dithering::Blue16,
-        Dithering::Blue32,
-        Dithering::Blue64,
-    ] {
+    for algo in Dithering::iter() {
         assert!(new(Settings { color_dithering: algo, ..Settings::default() }).is_ok());
     }
 }
 
 #[test]
 fn alpha_dithering_encoding() {
-    use gifski::Dithering;
-
-    for algo in [
-        Dithering::None,
-        Dithering::Bayer2,
-        Dithering::Bayer4,
-        Dithering::Bayer8,
-        Dithering::Blue16,
-        Dithering::Blue32,
-        Dithering::Blue64,
-    ] {
+    for algo in Dithering::iter().filter(|d| !d.is_error_diffusion()) {
         assert_anim_eq_with_settings(
             Settings { alpha_dithering: algo, ..Settings::default() },
             3, |n| format!("tests/a2/{:02}.png", 1 + n).into(), None, 15.0,
@@ -554,18 +528,7 @@ fn alpha_dithering_encoding() {
 
 #[test]
 fn color_dithering_encoding() {
-    use gifski::Dithering;
-
-    for algo in [
-        Dithering::None,
-        Dithering::FloydSteinberg,
-        Dithering::Bayer2,
-        Dithering::Bayer4,
-        Dithering::Bayer8,
-        Dithering::Blue16,
-        Dithering::Blue32,
-        Dithering::Blue64,
-    ] {
+    for algo in Dithering::iter() {
         assert_anim_eq_with_settings(
             Settings { color_dithering: algo, ..Settings::default() },
             3, |n| format!("tests/a2/{:02}.png", 1 + n).into(), None, 15.0,

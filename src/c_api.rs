@@ -80,7 +80,7 @@ pub enum GifskiSpeed {
 
 /// Dithering algorithm or matrix
 #[repr(u8)]
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, strum::EnumIter)]
 pub enum GifskiDithering {
     #[default]
     Default = 0,
@@ -92,6 +92,23 @@ pub enum GifskiDithering {
     Blue16 = 6,
     Blue32 = 7,
     Blue64 = 8,
+}
+
+impl GifskiDithering {
+    #[must_use]
+    pub fn to_dithering(self, default: Dithering) -> Dithering {
+        match self {
+            Self::Default => default,
+            Self::None => Dithering::None,
+            Self::FloydSteinberg => Dithering::FloydSteinberg,
+            Self::Bayer2 => Dithering::Bayer2,
+            Self::Bayer4 => Dithering::Bayer4,
+            Self::Bayer8 => Dithering::Bayer8,
+            Self::Blue16 => Dithering::Blue16,
+            Self::Blue32 => Dithering::Blue32,
+            Self::Blue64 => Dithering::Blue64,
+        }
+    }
 }
 
 /// Settings for creating a new encoder instance. See `gifski_new`
@@ -218,26 +235,8 @@ pub unsafe extern "C" fn gifski_new(settings: *const GifskiSettings) -> *const G
     } else {
         Vec::new()
     };
-    let alpha_dithering = match settings.alpha_dithering {
-        GifskiDithering::Default | GifskiDithering::Blue32 => Dithering::Blue32,
-        GifskiDithering::None => Dithering::None,
-        GifskiDithering::FloydSteinberg => Dithering::FloydSteinberg,
-        GifskiDithering::Bayer2 => Dithering::Bayer2,
-        GifskiDithering::Bayer4 => Dithering::Bayer4,
-        GifskiDithering::Bayer8 => Dithering::Bayer8,
-        GifskiDithering::Blue16 => Dithering::Blue16,
-        GifskiDithering::Blue64 => Dithering::Blue64,
-    };
-    let color_dithering = match settings.color_dithering {
-        GifskiDithering::Default | GifskiDithering::FloydSteinberg => Dithering::FloydSteinberg,
-        GifskiDithering::None => Dithering::None,
-        GifskiDithering::Bayer2 => Dithering::Bayer2,
-        GifskiDithering::Bayer4 => Dithering::Bayer4,
-        GifskiDithering::Bayer8 => Dithering::Bayer8,
-        GifskiDithering::Blue16 => Dithering::Blue16,
-        GifskiDithering::Blue32 => Dithering::Blue32,
-        GifskiDithering::Blue64 => Dithering::Blue64,
-    };
+    let alpha_dithering = settings.alpha_dithering.to_dithering(Dithering::Blue32);
+    let color_dithering = settings.color_dithering.to_dithering(Dithering::FloydSteinberg);
     let (alpha_low, alpha_high, alpha_mid) = if (settings.mask & GIFSKI_SETTINGS_ALPHA_THRESHOLDS) != 0 {
         (
             settings.alpha_low,
@@ -976,16 +975,9 @@ fn c_settings_dithering() {
     assert_eq!(1, mem::size_of::<GifskiDithering>());
 
     unsafe {
-        for algo in [
-            GifskiDithering::Default,
-            GifskiDithering::None,
-            GifskiDithering::Bayer2,
-            GifskiDithering::Bayer4,
-            GifskiDithering::Bayer8,
-            GifskiDithering::Blue16,
-            GifskiDithering::Blue32,
-            GifskiDithering::Blue64,
-        ] {
+        use strum::IntoEnumIterator;
+
+        for algo in GifskiDithering::iter().filter(|&d| d != GifskiDithering::FloydSteinberg) {
             let g = gifski_new(&GifskiSettings {
                 alpha_dithering: algo,
                 ..GifskiSettings::default()
@@ -994,17 +986,7 @@ fn c_settings_dithering() {
             let _ = gifski_finish(g);
         }
 
-        for algo in [
-            GifskiDithering::Default,
-            GifskiDithering::None,
-            GifskiDithering::FloydSteinberg,
-            GifskiDithering::Bayer2,
-            GifskiDithering::Bayer4,
-            GifskiDithering::Bayer8,
-            GifskiDithering::Blue16,
-            GifskiDithering::Blue32,
-            GifskiDithering::Blue64,
-        ] {
+        for algo in GifskiDithering::iter() {
             let g = gifski_new(&GifskiSettings {
                 color_dithering: algo,
                 ..GifskiSettings::default()

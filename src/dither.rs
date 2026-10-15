@@ -18,14 +18,17 @@ pub struct DitherMatrix {
 
 impl DitherMatrix {
     pub fn for_algorithm(algo: Dithering) -> Option<Self> {
+        if !algo.is_ordered() {
+            return None;
+        }
         match algo {
-            Dithering::None | Dithering::FloydSteinberg => None,
             Dithering::Bayer2 => Some(Self { data: &BAYER_2X2, width: 2, height: 2, max_val: 3 }),
             Dithering::Bayer4 => Some(Self { data: &BAYER_4X4, width: 4, height: 4, max_val: 15 }),
             Dithering::Bayer8 => Some(Self { data: &BAYER_8X8, width: 8, height: 8, max_val: 63 }),
             Dithering::Blue16 => Some(Self { data: &BLUE_NOISE_16X16, width: 16, height: 16, max_val: 255 }),
             Dithering::Blue32 => Some(Self { data: &BLUE_NOISE_32X32, width: 32, height: 32, max_val: 255 }),
             Dithering::Blue64 => Some(Self { data: &BLUE_NOISE_64X64, width: 64, height: 64, max_val: 255 }),
+            _ => unreachable!(),
         }
     }
 }

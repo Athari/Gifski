@@ -46,6 +46,7 @@ wasm-bindgen = { version = "0.2.125", optional = true }
 web-sys = { version = "0.3.102", features = ["console"], optional = true }
 console_error_panic_hook = { version = "0.1.7", optional = true}
 wasm-bindgen-rayon = "1.3.0"
+strum = { version = "0.28.0", features = ["derive"] }
 
 [dependencies.ffmpeg]
 package = "ffmpeg-next"

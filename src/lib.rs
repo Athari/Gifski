@@ -92,16 +92,25 @@ impl Speed {
 }
 
 /// Dithering algorithm or matrix.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, strum::EnumIter, strum::EnumString, strum::VariantNames, strum::Display, strum::IntoStaticStr)]
+#[strum(ascii_case_insensitive)]
 pub enum Dithering {
+    #[strum(serialize = "none")]
     None,
+    #[strum(serialize = "floyd-steinberg")]
     FloydSteinberg,
+    #[strum(serialize = "bayer2")]
     Bayer2,
+    #[strum(serialize = "bayer4")]
     Bayer4,
+    #[strum(serialize = "bayer8")]
     Bayer8,
+    #[strum(serialize = "blue16")]
     Blue16,
     #[default]
+    #[strum(serialize = "blue32")]
     Blue32,
+    #[strum(serialize = "blue64")]
     Blue64,
 }
 
@@ -110,6 +119,12 @@ impl Dithering {
     #[inline]
     pub fn is_ordered(&self) -> bool {
         !matches!(self, Self::None | Self::FloydSteinberg)
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn is_error_diffusion(&self) -> bool {
+        matches!(self, Self::FloydSteinberg)
     }
 }
 
@@ -358,7 +373,7 @@ pub fn new(settings: Settings) -> GifResult<(Collector, Writer)> {
     if settings.dithering_level.is_some_and(|d| !(0.0..=1.0).contains(&d)) {
         return Err(Error::WrongSize("dithering_level must be 0.0-1.0".into()));
     }
-    if settings.alpha_dithering == Dithering::FloydSteinberg {
+    if settings.alpha_dithering.is_error_diffusion() {
         return Err(Error::WrongSize("floyd-steinberg is not supported for alpha dithering".into()));
     }
     if settings.max_colors.is_some_and(|c| c < 2 || c > 256) {
@@ -623,7 +638,7 @@ impl Writer {
                 res = requantize(liq)?;
             }
         }
-        if self.settings.color_dithering == Dithering::FloydSteinberg {
+        if self.settings.color_dithering.is_error_diffusion() {
             res.set_dithering_level(self.settings.effective_dithering_level())?;
         } else {
             res.set_dithering_level(0.0)?;
@@ -636,7 +651,7 @@ impl Writer {
         let (width, height) = (img.width(), img.height());
         let mut out = Vec::new();
         out.try_reserve_exact(width * height).map_err(imagequant::liq_error::from)?;
-        if self.settings.color_dithering == Dithering::FloydSteinberg {
+        if self.settings.color_dithering.is_error_diffusion() {
             res.optionally_prepare_for_dithering_with_background_set(img, &mut out.spare_capacity_mut()[..width * height])?;
         }
         Ok(out)

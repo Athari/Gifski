@@ -131,14 +131,14 @@ fn bin_main() -> BinResult<()> {
                         .arg(Arg::new("color-dithering")
                             .long("color-dithering")
                             .value_name("matrix")
-                            .value_parser(parse_color_dithering)
+                            .value_parser(parse_dithering)
                             .num_args(1)
                             .default_value("floyd-steinberg")
                             .help("Algorithm or matrix used for color dithering: none|floyd-steinberg|bayer2|bayer4|bayer8|blue16|blue32|blue64 (defaults to floyd-steinberg)"))
                         .arg(Arg::new("alpha-dithering")
                             .long("alpha-dithering")
                             .value_name("matrix")
-                            .value_parser(parse_alpha_dithering)
+                            .value_parser(parse_dithering)
                             .num_args(1)
                             .default_value("blue32")
                             .help("Matrix used for alpha transparency dithering: none|bayer2|bayer4|bayer8|blue16|blue32|blue64 (defaults to blue32)"))
@@ -543,27 +543,16 @@ fn max_pixels_parser() {
 
 #[test]
 fn dithering_parser() {
-    assert_eq!(parse_alpha_dithering("none").unwrap(), Dithering::None);
-    assert_eq!(parse_alpha_dithering("bayer2").unwrap(), Dithering::Bayer2);
-    assert_eq!(parse_alpha_dithering("bayer4").unwrap(), Dithering::Bayer4);
-    assert_eq!(parse_alpha_dithering("bayer8").unwrap(), Dithering::Bayer8);
-    assert_eq!(parse_alpha_dithering("blue16").unwrap(), Dithering::Blue16);
-    assert_eq!(parse_alpha_dithering("blue32").unwrap(), Dithering::Blue32);
-    assert_eq!(parse_alpha_dithering("blue64").unwrap(), Dithering::Blue64);
-    assert!(parse_alpha_dithering("floyd-steinberg").is_err());
-    assert!(parse_alpha_dithering("invalid").is_err());
-    assert!(parse_alpha_dithering("blue256").is_err());
+    use strum::IntoEnumIterator;
 
-    assert_eq!(parse_color_dithering("none").unwrap(), Dithering::None);
-    assert_eq!(parse_color_dithering("floyd-steinberg").unwrap(), Dithering::FloydSteinberg);
-    assert_eq!(parse_color_dithering("bayer2").unwrap(), Dithering::Bayer2);
-    assert_eq!(parse_color_dithering("bayer4").unwrap(), Dithering::Bayer4);
-    assert_eq!(parse_color_dithering("bayer8").unwrap(), Dithering::Bayer8);
-    assert_eq!(parse_color_dithering("blue16").unwrap(), Dithering::Blue16);
-    assert_eq!(parse_color_dithering("blue32").unwrap(), Dithering::Blue32);
-    assert_eq!(parse_color_dithering("blue64").unwrap(), Dithering::Blue64);
-    assert!(parse_color_dithering("invalid").is_err());
-    assert!(parse_color_dithering("blue256").is_err());
+    for algo in Dithering::iter() {
+        assert_eq!(parse_dithering(algo.into()).unwrap(), algo);
+    }
+    assert_eq!(parse_dithering("Floyd-Steinberg").unwrap(), Dithering::FloydSteinberg);
+    assert_eq!(parse_dithering("NONE").unwrap(), Dithering::None);
+    assert_eq!(parse_dithering(" bayer4 ").unwrap(), Dithering::Bayer4);
+    assert!(parse_dithering("invalid").is_err());
+    assert!(parse_dithering("blue256").is_err());
 }
 
 fn parse_color_space(value: &str) -> Result<MatrixCoefficients, String> {
@@ -621,31 +610,11 @@ fn parse_max_pixels(value: &str) -> Result<u32, String> {
     }
 }
 
-fn parse_alpha_dithering(value: &str) -> Result<Dithering, String> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "none" => Ok(Dithering::None),
-        "bayer2" => Ok(Dithering::Bayer2),
-        "bayer4" => Ok(Dithering::Bayer4),
-        "bayer8" => Ok(Dithering::Bayer8),
-        "blue16" => Ok(Dithering::Blue16),
-        "blue32" => Ok(Dithering::Blue32),
-        "blue64" => Ok(Dithering::Blue64),
-        _ => Err("alpha dithering must be none, bayer2, bayer4, bayer8, blue16, blue32, or blue64".into()),
-    }
-}
-
-fn parse_color_dithering(value: &str) -> Result<Dithering, String> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "none" => Ok(Dithering::None),
-        "floyd-steinberg" => Ok(Dithering::FloydSteinberg),
-        "bayer2" => Ok(Dithering::Bayer2),
-        "bayer4" => Ok(Dithering::Bayer4),
-        "bayer8" => Ok(Dithering::Bayer8),
-        "blue16" => Ok(Dithering::Blue16),
-        "blue32" => Ok(Dithering::Blue32),
-        "blue64" => Ok(Dithering::Blue64),
-        _ => Err("color dithering must be none, floyd-steinberg, bayer2, bayer4, bayer8, blue16, blue32, or blue64".into()),
-    }
+fn parse_dithering(value: &str) -> Result<Dithering, String> {
+    use strum::VariantNames;
+    value.trim().parse::<Dithering>().map_err(|_| {
+        format!("dithering must be {}", Dithering::VARIANTS.join(", "))
+    })
 }
 
 #[allow(clippy::upper_case_acronyms)]
