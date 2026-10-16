@@ -615,3 +615,17 @@ fn test_dither_denoise_eliminates_oscillating_pixel() {
     assert_eq!(last_delay, 50);
 }
 
+#[test]
+fn dither_edge_threshold_encoding() {
+    for algo in [Dithering::Bayer4, Dithering::Blue32] {
+        assert_anim_eq_with_settings(
+            Settings {
+                color_dithering: algo,
+                dither_edge_threshold: 32,
+                ..Settings::default()
+            },
+            3, |n| format!("tests/a2/{:02}.png", 1 + n).into(), None, 15.0,
+        );
+    }
+}
+

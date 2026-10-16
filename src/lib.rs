@@ -197,6 +197,8 @@ pub struct Settings {
     /// Color distance threshold (0-255) for dither denoising. Differences above this are considered content and preserved. Defaults to 16.
     #[default = 16]
     pub dither_denoise_threshold: u8,
+    /// Color distance threshold (0-255) for edge-aware dithering suppression. 0 disables suppression. Defaults to 0.
+    pub dither_edge_threshold: u8,
 }
 
 impl Settings {
@@ -708,6 +710,7 @@ impl Writer {
                 background,
                 &mut pal_img,
                 dither_context,
+                self.settings.dither_edge_threshold,
             );
             Ok((Img::new(pal_img, width, height), pal))
         } else {

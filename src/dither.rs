@@ -538,12 +538,17 @@ impl KdTree {
     }
 }
 
+/// Minimum number of dissimilar neighbors in the 3x3 window required to trigger edge-aware dithering suppression.
+/// A straight orthogonal edge across the center pixel has exactly 3 neighbors across the boundary line.
+const EDGE_DISSIMILAR_MIN: usize = 3;
+
 const CANDIDATE_CACHE_SIZE: usize = 65536;
 
 #[derive(Copy, Clone, SmartDefault)]
 struct CandidateCacheEntry {
     #[default(u32::MAX)]
     key: u32,
+    nearest: u8,
     candidates: [u8; 16],
 }
 
@@ -578,6 +583,7 @@ impl DitherColorContext {
 }
 
 /// Dither colors using Thomas Knoll's pattern dithering (local error feedback).
+#[allow(clippy::too_many_arguments)]
 #[inline(never)]
 pub fn dither_color(
     image: ImgRef<RGBA8>,
@@ -588,6 +594,7 @@ pub fn dither_color(
     background: Option<ImgRef<RGBA8>>,
     out: &mut [u8],
     context: &mut DitherColorContext,
+    edge_threshold: u8,
 ) {
     let width = image.width();
     let height = image.height();
@@ -632,14 +639,22 @@ pub fn dither_color(
     let y_mask = matrix.height - 1;
     let m_width = matrix.width;
     let max_val = matrix.max_val as usize;
+    let edge_threshold_sq = (u32::from(edge_threshold) * u32::from(edge_threshold)) * 6;
 
     for y in 0..height {
-        let img_row = &image.buf()[y * image.stride()..y * image.stride() + width];
+        let stride = image.stride();
+        let img_row = &image.buf()[y * stride..y * stride + width];
         let out_row = &mut out[y * width..(y + 1) * width];
         let bg_row = background.map(|bg| &bg.buf()[y * bg.stride()..y * bg.stride() + width]);
 
+        let has_top = y > 0;
+        let has_bot = y + 1 < height;
+        let top_row = if has_top { Some(&image.buf()[(y - 1) * stride..(y - 1) * stride + width]) } else { None };
+        let bot_row = if has_bot { Some(&image.buf()[(y + 1) * stride..(y + 1) * stride + width]) } else { None };
+
         let mut prev_px: Option<RGBA8> = None;
         let mut candidates = [0u8; 64];
+        let mut nearest_idx = 0u8;
 
         for x in 0..width {
             let px = img_row[x];
@@ -657,6 +672,7 @@ pub fn dither_color(
                 let cache_idx = ((key.wrapping_mul(0x9E3779B9)) >> 16) as usize & (CANDIDATE_CACHE_SIZE - 1);
 
                 if candidate_cache[cache_idx].key == key {
+                    nearest_idx = candidate_cache[cache_idx].nearest;
                     candidates[..k].copy_from_slice(&candidate_cache[cache_idx].candidates[..k]);
                 } else {
                     let px_r = px.r as f32;
@@ -664,17 +680,21 @@ pub fn dither_color(
                     let px_b = px.b as f32;
 
                     if dithering_level == 0.0 {
-                        let (nearest_idx, _) = kd_tree.find_nearest(px_r, px_g, px_b);
+                        let (nearest, _) = kd_tree.find_nearest(px_r, px_g, px_b);
+                        nearest_idx = nearest;
                         candidates[..k].fill(nearest_idx);
                     } else {
                         let mut err_r = 0.0f32;
                         let mut err_g = 0.0f32;
                         let mut err_b = 0.0f32;
-                        for cand in candidates[..k].iter_mut() {
+                        for (step, cand) in candidates[..k].iter_mut().enumerate() {
                             let tr = (px_r + err_r).clamp(0.0, 255.0);
                             let tg = (px_g + err_g).clamp(0.0, 255.0);
                             let tb = (px_b + err_b).clamp(0.0, 255.0);
                             let (chosen_idx, chosen_color) = kd_tree.find_nearest(tr, tg, tb);
+                            if step == 0 {
+                                nearest_idx = chosen_idx;
+                            }
                             *cand = chosen_idx;
                             err_r = (err_r + (px_r - chosen_color.r as f32)) * dithering_level;
                             err_g = (err_g + (px_g - chosen_color.g as f32)) * dithering_level;
@@ -684,12 +704,94 @@ pub fn dither_color(
                     }
 
                     candidate_cache[cache_idx].key = key;
+                    candidate_cache[cache_idx].nearest = nearest_idx;
                     candidate_cache[cache_idx].candidates[..k].copy_from_slice(&candidates[..k]);
                 }
             }
 
-            let dither_val = matrix.data[(y & y_mask) * m_width + (x & x_mask)] as usize;
-            let dithered_idx = candidates[(dither_val * k) / (max_val + 1)];
+            let is_edge = if edge_threshold > 0 {
+                let mut dissimilar_count = 0;
+
+                if let (Some(top), Some(bot)) = (top_row, bot_row) {
+                    if x > 0 && x + 1 < width {
+                        let neighbors = [
+                            top[x - 1],
+                            top[x],
+                            top[x + 1],
+                            img_row[x - 1],
+                            img_row[x + 1],
+                            bot[x - 1],
+                            bot[x],
+                            bot[x + 1],
+                        ];
+                        for n_px in neighbors {
+                            if n_px.a <= 128 || color_diff_rgb(px, n_px) > edge_threshold_sq {
+                                dissimilar_count += 1;
+                                if dissimilar_count >= EDGE_DISSIMILAR_MIN {
+                                    break;
+                                }
+                            }
+                        }
+                    } else {
+                        let x_prev = x.saturating_sub(1);
+                        let x_next = (x + 1).min(width - 1);
+                        let neighbors = [
+                            top[x_prev],
+                            top[x],
+                            top[x_next],
+                            img_row[x_prev],
+                            img_row[x_next],
+                            bot[x_prev],
+                            bot[x],
+                            bot[x_next],
+                        ];
+                        for n_px in neighbors {
+                            if n_px.a <= 128 || color_diff_rgb(px, n_px) > edge_threshold_sq {
+                                dissimilar_count += 1;
+                                if dissimilar_count >= EDGE_DISSIMILAR_MIN {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    let y_prev = y.saturating_sub(1);
+                    let y_next = (y + 1).min(height - 1);
+                    let x_prev = x.saturating_sub(1);
+                    let x_next = (x + 1).min(width - 1);
+
+                    let neighbors = [
+                        (x_prev, y_prev),
+                        (x,      y_prev),
+                        (x_next, y_prev),
+                        (x_prev, y),
+                        (x_next, y),
+                        (x_prev, y_next),
+                        (x,      y_next),
+                        (x_next, y_next),
+                    ];
+                    for (nx, ny) in neighbors {
+                        let n_px = image.buf()[ny * stride + nx];
+                        if n_px.a <= 128 || color_diff_rgb(px, n_px) > edge_threshold_sq {
+                            dissimilar_count += 1;
+                            if dissimilar_count >= EDGE_DISSIMILAR_MIN {
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                dissimilar_count >= EDGE_DISSIMILAR_MIN
+            } else {
+                false
+            };
+
+            let dithered_idx = if is_edge {
+                nearest_idx
+            } else {
+                let dither_val = matrix.data[(y & y_mask) * m_width + (x & x_mask)] as usize;
+                candidates[(dither_val * k) / (max_val + 1)]
+            };
 
             let mut final_idx = dithered_idx;
             if let (Some(bg_row), Some(trans_idx)) = (bg_row, transparent_index) {
@@ -890,7 +992,7 @@ mod tests {
             let mut out = vec![0u8; 32 * 32];
 
             // At dithering_level = 0.1, flat area must have zero stray pixels: all pixels map to nearest neighbor (1)
-            dither_color(img.as_ref(), &palette, matrix, 0.1, true, None, &mut out, &mut ctx);
+            dither_color(img.as_ref(), &palette, matrix, 0.1, true, None, &mut out, &mut ctx, 0);
             assert!(
                 out.iter().all(|&idx| idx == 1),
                 "flat area at dithering_level 0.1 with {:?} produced stray pixels",
@@ -898,7 +1000,7 @@ mod tests {
             );
 
             // At dithering_level = 0.0, all pixels must map to nearest neighbor (1)
-            dither_color(img.as_ref(), &palette, matrix, 0.0, true, None, &mut out, &mut ctx);
+            dither_color(img.as_ref(), &palette, matrix, 0.0, true, None, &mut out, &mut ctx, 0);
             assert!(
                 out.iter().all(|&idx| idx == 1),
                 "flat area at dithering_level 0.0 with {:?} produced stray pixels",
@@ -931,7 +1033,7 @@ mod tests {
 
         // When exact_match is false (e.g. motion_quality < 100), perceptual check bg_diff <= dither_diff
         // forces all pixels to 0 (transparent) because bg_px (98) is closer to px (102) than dithered_color (110).
-        dither_color(img.as_ref(), &palette, matrix, 1.0, false, Some(bg.as_ref()), &mut out, &mut ctx);
+        dither_color(img.as_ref(), &palette, matrix, 1.0, false, Some(bg.as_ref()), &mut out, &mut ctx, 0);
         assert!(
             out.iter().all(|&idx| idx == 0),
             "when exact_match is false, perceptual check should reuse background for all pixels"
@@ -939,7 +1041,7 @@ mod tests {
 
         // When exact_match is true (motion_quality == 100), exact match is required:
         // pixels that dither to color B (2) must NOT be suppressed into transparent (0).
-        dither_color(img.as_ref(), &palette, matrix, 1.0, true, Some(bg.as_ref()), &mut out, &mut ctx);
+        dither_color(img.as_ref(), &palette, matrix, 1.0, true, Some(bg.as_ref()), &mut out, &mut ctx, 0);
         assert!(
             out.contains(&2),
             "when exact_match is true, pixels dithering to color B must not be smeared into transparent"
@@ -950,12 +1052,68 @@ mod tests {
         let bg_matching_data = vec![RGBA8::new(110, 110, 110, 255); 4 * 4];
         let bg_matching = Img::new(bg_matching_data, 4, 4);
         let mut out_matching = vec![0u8; 4 * 4];
-        dither_color(img.as_ref(), &palette, matrix, 1.0, true, Some(bg_matching.as_ref()), &mut out_matching, &mut ctx);
+        dither_color(img.as_ref(), &palette, matrix, 1.0, true, Some(bg_matching.as_ref()), &mut out_matching, &mut ctx, 0);
         for i in 0..16 {
             if out[i] == 2 {
                 assert_eq!(out_matching[i], 0, "identical output pixel must be marked transparent");
             }
         }
+    }
+
+    #[test]
+    fn test_dither_color_edge_suppression() {
+        // Image with an orthogonal high-contrast edge:
+        // Left half (x in 0..8): RGBA8::new(20, 20, 20, 255)
+        // Right half (x in 8..16): RGBA8::new(200, 200, 200, 255)
+        let width = 16;
+        let height = 16;
+        let mut img_data = Vec::with_capacity(width * height);
+        for _y in 0..height {
+            for x in 0..width {
+                if x < 8 {
+                    img_data.push(RGBA8::new(20, 20, 20, 255));
+                } else {
+                    img_data.push(RGBA8::new(200, 200, 200, 255));
+                }
+            }
+        }
+        let img = Img::new(img_data, width, height);
+
+        let palette = vec![
+            RGBA8::new(0, 0, 0, 255),
+            RGBA8::new(15, 15, 15, 255),
+            RGBA8::new(25, 25, 25, 255),
+            RGBA8::new(190, 190, 190, 255),
+            RGBA8::new(210, 210, 210, 255),
+            RGBA8::new(255, 255, 255, 255),
+        ];
+
+        let matrix = DitherMatrix::for_algorithm(Dithering::Bayer4).unwrap();
+        let mut out_normal = vec![0u8; width * height];
+        let mut out_suppressed = vec![0u8; width * height];
+        let mut ctx = DitherColorContext::new();
+
+        // With edge_threshold = 0, standard dithering is applied:
+        // Columns 6 and 7 will contain dither patterns between candidates (15 and 25).
+        dither_color(img.as_ref(), &palette, matrix, 1.0, true, None, &mut out_normal, &mut ctx, 0);
+
+        // With edge_threshold = 32, edge pixels (e.g. at x=7 and x=8) have >= 3 dissimilar neighbors.
+        // Their dithering must be suppressed, snapping directly to the single nearest palette color!
+        dither_color(img.as_ref(), &palette, matrix, 1.0, true, None, &mut out_suppressed, &mut ctx, 32);
+
+        // Check that column 7 in normal dithering has alternating dither values:
+        let col7_normal: Vec<u8> = (0..height).map(|y| out_normal[y * width + 7]).collect();
+        assert!(col7_normal.contains(&1) && col7_normal.contains(&2), "normal dithering should dither column 7");
+
+        // In suppressed dithering, column 7 is an edge pixel and must have uniform color (snapped to nearest palette color):
+        let col7_suppressed: Vec<u8> = (0..height).map(|y| out_suppressed[y * width + 7]).collect();
+        let first_val = col7_suppressed[0];
+        assert!(col7_suppressed.iter().all(|&v| v == first_val), "edge suppression should eliminate dither variation on column 7");
+
+        // Similarly for column 8 (the other side of the edge):
+        let col8_suppressed: Vec<u8> = (0..height).map(|y| out_suppressed[y * width + 8]).collect();
+        let first_val_8 = col8_suppressed[0];
+        assert!(col8_suppressed.iter().all(|&v| v == first_val_8), "edge suppression should eliminate dither variation on column 8");
     }
 
     #[test]

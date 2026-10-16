@@ -165,6 +165,8 @@ pub struct GifskiSettings {
     pub dither_denoise_radius: u8,
     /// Color distance threshold (0-255) for dither denoising. 0 defaults to 16.
     pub dither_denoise_threshold: u8,
+    /// Color distance threshold (0-255) for edge-aware dithering suppression. 0 disables suppression.
+    pub dither_edge_threshold: u8,
 }
 
 #[repr(C)]
@@ -250,6 +252,7 @@ pub unsafe extern "C" fn gifski_new(settings: *const GifskiSettings) -> *const G
         alpha_mid,
         dither_denoise_radius: settings.dither_denoise_radius,
         dither_denoise_threshold: if settings.dither_denoise_threshold > 0 { settings.dither_denoise_threshold } else { 16 },
+        dither_edge_threshold: settings.dither_edge_threshold,
     };
 
     if let Ok((collector, writer)) = crate::new(s) {

@@ -181,6 +181,10 @@ typedef struct GifskiSettings {
    * Color distance threshold (0-255) for dither denoising. 0 defaults to 16.
    */
   uint8_t dither_denoise_threshold;
+  /**
+   * Color distance threshold (0-255) for edge-aware dithering suppression. 0 defaults to disabled.
+   */
+  uint8_t dither_edge_threshold;
 } GifskiSettings;
 
 typedef enum GifskiError {

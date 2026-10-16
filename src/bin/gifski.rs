@@ -149,6 +149,13 @@ fn bin_main() -> BinResult<()> {
                             .num_args(1)
                             .default_value("16")
                             .help("Color distance threshold for dither denoising; higher differences are treated as content and preserved (defaults to 16)"))
+                        .arg(Arg::new("dither-edge-threshold")
+                            .long("dither-edge-threshold")
+                            .value_name("0-255")
+                            .value_parser(value_parser!(u8))
+                            .num_args(1)
+                            .default_value("0")
+                            .help("Color distance threshold for edge-aware dithering suppression; pixels on sharp edges snap to nearest color (defaults to 0 / disabled)"))
                         .arg(Arg::new("alpha-dithering")
                             .long("alpha-dithering")
                             .value_name("matrix")
@@ -314,6 +321,7 @@ fn bin_main() -> BinResult<()> {
     let alpha_mid = matches.get_one::<u8>("alpha-mid").copied();
     let dither_denoise_radius = matches.get_one::<u8>("dither-denoise-radius").copied().unwrap_or(0);
     let dither_denoise_threshold = matches.get_one::<u8>("dither-denoise-threshold").copied().unwrap_or(16);
+    let dither_edge_threshold = matches.get_one::<u8>("dither-edge-threshold").copied().unwrap_or(0);
     let settings = Settings {
         width,
         height,
@@ -335,6 +343,7 @@ fn bin_main() -> BinResult<()> {
         alpha_mid,
         dither_denoise_radius,
         dither_denoise_threshold,
+        dither_edge_threshold,
     };
     let quiet = matches.get_flag("quiet") || output_path == DestPath::Stdout;
     let fps: Option<f32> = matches.get_one::<f32>("fps").copied();
