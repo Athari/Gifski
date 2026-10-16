@@ -135,6 +135,20 @@ fn bin_main() -> BinResult<()> {
                             .num_args(1)
                             .default_value("floyd-steinberg")
                             .help("Algorithm or matrix used for color dithering: none|floyd-steinberg|bayer2|bayer4|bayer8|blue16|blue32|blue64 (defaults to floyd-steinberg)"))
+                        .arg(Arg::new("dither-denoise-radius")
+                            .long("dither-denoise-radius")
+                            .value_name("0-2")
+                            .value_parser(value_parser!(u8).range(0..=2))
+                            .num_args(1)
+                            .default_value("0")
+                            .help("Temporal radius for denoising stray oscillating dither pixels: 0=off, 1=3 frames, 2=5 frames (defaults to 0)"))
+                        .arg(Arg::new("dither-denoise-threshold")
+                            .long("dither-denoise-threshold")
+                            .value_name("0-255")
+                            .value_parser(value_parser!(u8))
+                            .num_args(1)
+                            .default_value("16")
+                            .help("Color distance threshold for dither denoising; higher differences are treated as content and preserved (defaults to 16)"))
                         .arg(Arg::new("alpha-dithering")
                             .long("alpha-dithering")
                             .value_name("matrix")
@@ -298,6 +312,8 @@ fn bin_main() -> BinResult<()> {
     let alpha_low = matches.get_one::<u8>("alpha-low").copied().unwrap_or(8);
     let alpha_high = matches.get_one::<u8>("alpha-high").copied().unwrap_or(134);
     let alpha_mid = matches.get_one::<u8>("alpha-mid").copied();
+    let dither_denoise_radius = matches.get_one::<u8>("dither-denoise-radius").copied().unwrap_or(0);
+    let dither_denoise_threshold = matches.get_one::<u8>("dither-denoise-threshold").copied().unwrap_or(16);
     let settings = Settings {
         width,
         height,
@@ -317,6 +333,8 @@ fn bin_main() -> BinResult<()> {
         alpha_low,
         alpha_high,
         alpha_mid,
+        dither_denoise_radius,
+        dither_denoise_threshold,
     };
     let quiet = matches.get_flag("quiet") || output_path == DestPath::Stdout;
     let fps: Option<f32> = matches.get_one::<f32>("fps").copied();

@@ -714,6 +714,158 @@ pub fn dither_color(
     }
 }
 
+/// Matches dithered palette indices against the background canvas and replaces matching pixels with `transparent_index`.
+pub fn apply_background_transparency(
+    out_row: &mut [u8],
+    source_row: &[RGBA8],
+    bg_row: &[RGBA8],
+    palette: &[RGBA8],
+    transparent_index: u8,
+    exact_match: bool,
+) {
+    for (x, out_px) in out_row.iter_mut().enumerate() {
+        let px = source_row[x];
+        if px.a <= 128 {
+            *out_px = transparent_index;
+            continue;
+        }
+        let bg_px = bg_row[x];
+        if bg_px.a > 128 {
+            let dithered_color = palette[*out_px as usize];
+            let matches_bg = if exact_match {
+                dithered_color.rgb() == bg_px.rgb()
+            } else {
+                let dither_diff = color_diff_rgb(px, dithered_color);
+                let bg_diff = color_diff_rgb(px, bg_px);
+                bg_diff <= dither_diff
+            };
+            if matches_bg {
+                *out_px = transparent_index;
+            }
+        }
+    }
+}
+
+/// Minimum number of 3x3 neighbors that must be within the color similarity threshold.
+pub const SPATIAL_SIMILAR_MIN: usize = 5;
+
+/// Minimum number of 3x3 neighbors that must have the exact same palette index.
+pub const SPATIAL_EXACT_MIN: usize = 3;
+
+/// Denoises single stray oscillating pixels in a dithered palette-indexed frame.
+///
+/// Looks at the 3x3 spatial neighborhood in `current_frame` to find a dominant palette color
+/// (at least `SPATIAL_EXACT_MIN` exact matches and `SPATIAL_SIMILAR_MIN` similar neighbors).
+/// If the center pixel deviates from this dominant color by no more than `threshold`, and the temporal
+/// neighbors strictly equal the dominant color across `prev_frames` and `next_frames`, it is replaced
+/// with the dominant color.
+///
+/// Temporal continuity rule: if a neighbor at distance r=1 is outside the threshold,
+/// any neighbor at r=2 on the same side is also treated as outside the threshold.
+#[allow(clippy::too_many_arguments)]
+pub fn denoise_dithered_frame(
+    current_frame: &mut [u8],
+    width: usize,
+    height: usize,
+    prev_frames: &[&[u8]], // ordered by distance from center: [dist1, dist2]
+    next_frames: &[&[u8]], // ordered by distance from center: [dist1, dist2]
+    palette: &[RGBA8],
+    radius: u8,
+    threshold: u8,
+    transparent_index: Option<u8>,
+) {
+    if radius == 0 || threshold == 0 || width < 3 || height < 3 {
+        return;
+    }
+
+    let threshold_sq = (u32::from(threshold) * u32::from(threshold)) * 6;
+    let src = current_frame.to_vec();
+
+    for y in 1..height - 1 {
+        let top_y = (y - 1) * width;
+        let mid_y = y * width;
+        let bot_y = (y + 1) * width;
+
+        for x in 1..width - 1 {
+            let idx = mid_y + x;
+            let center_idx = src[idx];
+            if Some(center_idx) == transparent_index {
+                continue;
+            }
+
+            let neighbors = [
+                src[top_y + (x - 1)],
+                src[top_y + x],
+                src[top_y + (x + 1)],
+                src[mid_y + (x - 1)],
+                src[mid_y + (x + 1)],
+                src[bot_y + (x - 1)],
+                src[bot_y + x],
+                src[bot_y + (x + 1)],
+            ];
+
+            let mut majority_idx = None;
+            for i in 0..5 {
+                let candidate = neighbors[i];
+                if Some(candidate) == transparent_index {
+                    continue;
+                }
+                if i > 0 && neighbors[0..i].contains(&candidate) {
+                    continue;
+                }
+                let exact_count = neighbors.iter().filter(|&&c| c == candidate).count();
+                if exact_count >= SPATIAL_EXACT_MIN {
+                    let c_cand = palette[candidate as usize];
+                    let similar_count = neighbors.iter().filter(|&&c| {
+                        Some(c) != transparent_index && color_diff_rgb(palette[c as usize], c_cand) <= threshold_sq
+                    }).count();
+                    if similar_count >= SPATIAL_SIMILAR_MIN {
+                        majority_idx = Some(candidate);
+                        break;
+                    }
+                }
+            }
+
+            let Some(maj_idx) = majority_idx else {
+                continue;
+            };
+
+            // Tested pixel must not be equal to majority
+            if center_idx == maj_idx {
+                continue;
+            }
+
+            let c_maj = palette[maj_idx as usize];
+            let p_center = palette[center_idx as usize];
+
+            // Content preservation check: if color difference is too large, it is genuine content.
+            if color_diff_rgb(p_center, c_maj) > threshold_sq {
+                continue;
+            }
+
+            // Temporal column check: temporal neighbors must strictly equal maj_idx
+            let match_prev1 = !prev_frames.is_empty() && prev_frames[0][idx] == maj_idx;
+            let match_prev2 = match_prev1 && (prev_frames.len() > 1 && prev_frames[1][idx] == maj_idx);
+
+            let match_next1 = !next_frames.is_empty() && next_frames[0][idx] == maj_idx;
+            let match_next2 = match_next1 && (next_frames.len() > 1 && next_frames[1][idx] == maj_idx);
+
+            let should_replace = if radius == 1 {
+                match_prev1 && match_next1
+            } else if radius == 2 {
+                let matches = (match_prev1 as u8) + (match_prev2 as u8) + (match_next1 as u8) + (match_next2 as u8);
+                matches >= 3
+            } else {
+                false
+            };
+
+            if should_replace {
+                current_frame[idx] = maj_idx;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -804,5 +956,184 @@ mod tests {
                 assert_eq!(out_matching[i], 0, "identical output pixel must be marked transparent");
             }
         }
+    }
+
+    #[test]
+    fn test_denoise_dithered_frame_radius1_removes_spike() {
+        let palette = vec![
+            RGBA8::new(0, 0, 255, 255),   // 0: Blue
+            RGBA8::new(0, 0, 240, 255),   // 1: Off-blue (diff: 15^2 = 225 <= 16^2*6 = 1536)
+            RGBA8::new(0, 0, 0, 255),     // 2: Black
+            RGBA8::new(255, 255, 255, 255), // 3: White
+        ];
+
+        // 5x5 image
+        let prev = vec![0u8; 25];
+        let mut curr = vec![0u8; 25];
+        let next = vec![0u8; 25];
+
+        // Center pixel at (2, 2) is off-blue (1)
+        curr[2 * 5 + 2] = 1;
+
+        let prev_slices = [&prev[..]];
+        let next_slices = [&next[..]];
+
+        denoise_dithered_frame(&mut curr, 5, 5, &prev_slices, &next_slices, &palette, 1, 16, None);
+
+        // Center pixel must be replaced with dominant color Blue (0)
+        assert_eq!(curr[2 * 5 + 2], 0, "Single-frame off-blue spike should be replaced with majority blue");
+    }
+
+    #[test]
+    fn test_denoise_dithered_frame_preserves_content() {
+        let palette = vec![
+            RGBA8::new(0, 0, 255, 255),   // 0: Blue
+            RGBA8::new(0, 0, 240, 255),   // 1: Off-blue
+            RGBA8::new(0, 0, 0, 255),     // 2: Black (diff to blue is 255^2 = 65025 > 1536)
+        ];
+
+        let prev = vec![0u8; 25];
+        let mut curr = vec![0u8; 25];
+        let next = vec![0u8; 25];
+
+        // Center pixel at (2, 2) is black (2) - genuine high contrast content
+        curr[2 * 5 + 2] = 2;
+
+        let prev_slices = [&prev[..]];
+        let next_slices = [&next[..]];
+
+        denoise_dithered_frame(&mut curr, 5, 5, &prev_slices, &next_slices, &palette, 1, 16, None);
+
+        // Black pixel must NOT be replaced
+        assert_eq!(curr[2 * 5 + 2], 2, "High contrast content pixel must be preserved");
+    }
+
+    #[test]
+    fn test_denoise_dithered_frame_preserves_checkerboard_pattern() {
+        let palette = vec![
+            RGBA8::new(0, 0, 255, 255),     // 0: Blue
+            RGBA8::new(255, 255, 255, 255), // 1: White
+        ];
+
+        // 5x5 checkerboard pattern: alternate 0 and 1
+        let mut curr = vec![0u8; 25];
+        for y in 0..5 {
+            for x in 0..5 {
+                curr[y * 5 + x] = ((x + y) % 2) as u8;
+            }
+        }
+        let original = curr.clone();
+        let prev = curr.clone();
+        let next = curr.clone();
+
+        let prev_slices = [&prev[..]];
+        let next_slices = [&next[..]];
+
+        denoise_dithered_frame(&mut curr, 5, 5, &prev_slices, &next_slices, &palette, 1, 16, None);
+
+        // In a 50/50 checkerboard, neither color has >= 5 spatial neighbors, so no pixel should change
+        assert_eq!(curr, original, "Checkerboard dither pattern must be completely preserved");
+    }
+
+    #[test]
+    fn test_denoise_dithered_frame_radius2_continuity_rule() {
+        let palette = vec![
+            RGBA8::new(0, 0, 255, 255), // 0: Blue
+            RGBA8::new(0, 0, 240, 255), // 1: Off-blue
+            RGBA8::new(0, 0, 0, 255),   // 2: Black
+        ];
+
+        // Sequence across time: [blue (t-2), blue (t-1), off-blue (t0), black (t+1), blue (t+2)]
+        let prev2 = vec![0u8; 25]; // blue
+        let prev1 = vec![0u8; 25]; // blue
+        let mut curr = vec![0u8; 25];
+        curr[2 * 5 + 2] = 1;       // off-blue at center
+        let mut next1 = vec![0u8; 25];
+        next1[2 * 5 + 2] = 2;      // black at center (t+1)
+        let next2 = vec![0u8; 25]; // blue at center (t+2)
+
+        // Ordered by distance from center: [dist1, dist2]
+        let prev_slices = [&prev1[..], &prev2[..]];
+        let next_slices = [&next1[..], &next2[..]];
+
+        denoise_dithered_frame(&mut curr, 5, 5, &prev_slices, &next_slices, &palette, 2, 16, None);
+
+        // Because t+1 is black (outside threshold), t+2 (blue) must also be treated as outside threshold.
+        // Therefore only t-1 and t-2 match (count = 2 < 3), so off-blue must NOT be replaced!
+        assert_eq!(curr[2 * 5 + 2], 1, "Off-blue must not be replaced when t+1 is black (continuity rule)");
+    }
+
+    #[test]
+    fn test_denoise_dithered_frame_radius2_replaces_isolated_spike() {
+        let palette = vec![
+            RGBA8::new(0, 0, 255, 255), // 0: Blue
+            RGBA8::new(0, 0, 240, 255), // 1: Off-blue
+        ];
+
+        // Sequence: [blue, blue, off-blue, blue, blue]
+        let prev2 = vec![0u8; 25];
+        let prev1 = vec![0u8; 25];
+        let mut curr = vec![0u8; 25];
+        curr[2 * 5 + 2] = 1; // off-blue
+        let next1 = vec![0u8; 25];
+        let next2 = vec![0u8; 25];
+
+        let prev_slices = [&prev1[..], &prev2[..]];
+        let next_slices = [&next1[..], &next2[..]];
+
+        denoise_dithered_frame(&mut curr, 5, 5, &prev_slices, &next_slices, &palette, 2, 16, None);
+
+        // 4 matching neighbors >= 3 -> replaced
+        assert_eq!(curr[2 * 5 + 2], 0, "Off-blue isolated spike in R=2 must be replaced with blue");
+    }
+
+    #[test]
+    fn test_denoise_dithered_frame_radius2_contiguous_3_matches() {
+        let palette = vec![
+            RGBA8::new(0, 0, 255, 255), // 0: Blue
+            RGBA8::new(0, 0, 240, 255), // 1: Off-blue
+            RGBA8::new(0, 0, 0, 255),   // 2: Black
+        ];
+
+        // Sequence: [black (t-2), blue (t-1), off-blue (t0), blue (t+1), blue (t+2)]
+        let mut prev2 = vec![0u8; 25];
+        prev2[2 * 5 + 2] = 2; // black at t-2
+        let prev1 = vec![0u8; 25];
+        let mut curr = vec![0u8; 25];
+        curr[2 * 5 + 2] = 1; // off-blue at t0
+        let next1 = vec![0u8; 25];
+        let next2 = vec![0u8; 25];
+
+        let prev_slices = [&prev1[..], &prev2[..]];
+        let next_slices = [&next1[..], &next2[..]];
+
+        denoise_dithered_frame(&mut curr, 5, 5, &prev_slices, &next_slices, &palette, 2, 16, None);
+
+        // t-1 matches (1), t+1 matches (1), t+2 matches (1) -> count = 3 >= 3 -> replaced
+        assert_eq!(curr[2 * 5 + 2], 0, "Off-blue with 3 contiguous matches in R=2 must be replaced with blue");
+    }
+
+    #[test]
+    fn test_denoise_dithered_frame_preserves_static_dither_dot() {
+        let palette = vec![
+            RGBA8::new(0, 0, 255, 255), // 0: Blue
+            RGBA8::new(0, 0, 240, 255), // 1: Off-blue
+        ];
+
+        // A static dither dot at (2, 2) that stays off-blue across all frames
+        let mut prev = vec![0u8; 25];
+        prev[2 * 5 + 2] = 1;
+        let mut curr = vec![0u8; 25];
+        curr[2 * 5 + 2] = 1;
+        let mut next = vec![0u8; 25];
+        next[2 * 5 + 2] = 1;
+
+        let prev_slices = [&prev[..]];
+        let next_slices = [&next[..]];
+
+        denoise_dithered_frame(&mut curr, 5, 5, &prev_slices, &next_slices, &palette, 1, 16, None);
+
+        // The static dither dot must NOT be flattened to blue (0)
+        assert_eq!(curr[2 * 5 + 2], 1, "Static dither dot present across frames must not be flattened");
     }
 }

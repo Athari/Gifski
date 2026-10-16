@@ -161,6 +161,10 @@ pub struct GifskiSettings {
     pub alpha_high: u8,
     /// Anti-aliased edges and non-dithered threshold (0-255, 0 = default) when `GIFSKI_SETTINGS_ALPHA_THRESHOLDS` is set in `mask`.
     pub alpha_mid: u8,
+    /// Temporal radius for post-dither denoising (0=off, 1=3 frames, 2=5 frames). 0 defaults to disabled.
+    pub dither_denoise_radius: u8,
+    /// Color distance threshold (0-255) for dither denoising. 0 defaults to 16.
+    pub dither_denoise_threshold: u8,
 }
 
 #[repr(C)]
@@ -244,6 +248,8 @@ pub unsafe extern "C" fn gifski_new(settings: *const GifskiSettings) -> *const G
         alpha_low,
         alpha_high,
         alpha_mid,
+        dither_denoise_radius: settings.dither_denoise_radius,
+        dither_denoise_threshold: if settings.dither_denoise_threshold > 0 { settings.dither_denoise_threshold } else { 16 },
     };
 
     if let Ok((collector, writer)) = crate::new(s) {

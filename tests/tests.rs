@@ -546,3 +546,72 @@ fn color_dithering_encoding() {
     );
 }
 
+#[test]
+fn dither_denoise_validation() {
+    assert!(new(Settings { dither_denoise_radius: 0, ..Settings::default() }).is_ok());
+    assert!(new(Settings { dither_denoise_radius: 1, ..Settings::default() }).is_ok());
+    assert!(new(Settings { dither_denoise_radius: 2, ..Settings::default() }).is_ok());
+    assert!(new(Settings { dither_denoise_radius: 3, ..Settings::default() }).is_err());
+}
+
+#[test]
+fn dither_denoise_encoding() {
+    for radius in [1, 2] {
+        assert_anim_eq_with_settings(
+            Settings {
+                color_dithering: Dithering::Bayer4,
+                global_palette: true,
+                motion_quality: Some(100),
+                dither_denoise_radius: radius,
+                dither_denoise_threshold: 16,
+                ..Settings::default()
+            },
+            5, |n| format!("tests/a2/{:02}.png", 1 + (n % 3)).into(), None, 15.0,
+        );
+    }
+}
+
+#[test]
+fn test_dither_denoise_eliminates_oscillating_pixel() {
+    let w = 8;
+    let h = 8;
+    let base_color = RGBA8::new(0, 0, 200, 255);
+    let spike_color = RGBA8::new(0, 0, 192, 255); // within threshold 16
+
+    let (c, writer) = new(Settings {
+        color_dithering: Dithering::Bayer4,
+        global_palette: true,
+        motion_quality: Some(100),
+        dither_denoise_radius: 1,
+        dither_denoise_threshold: 16,
+        ..Settings::default()
+    }).unwrap();
+
+    let t = std::thread::spawn(move || {
+        for n in 0..5 {
+            let mut img = ImgVec::new(vec![base_color; w * h], w, h);
+            if n == 2 {
+                img.buf_mut()[4 * w + 4] = spike_color;
+            }
+            c.add_frame_rgba(n, img, n as f64 * 0.1).unwrap();
+        }
+    });
+
+    let mut out = Vec::new();
+    writer.write(&mut out, &mut progress::NoProgress {}).unwrap();
+    t.join().unwrap();
+
+    let mut frames_seen = 0;
+    let mut last_delay = 0;
+    for_each_frame(&out, |delay, _frame, rendered| {
+        last_delay = delay;
+        frames_seen += 1;
+        let px = rendered.buf()[4 * w + 4];
+        let corner_px = rendered.buf()[0];
+        assert_eq!(px, corner_px, "Spike pixel should be cleaned to match surrounding base color");
+    });
+    // Identical frames 0-1 and 3-4 are merged by Gifski's frame deduplicator into 3 GIF frames
+    assert_eq!(frames_seen, 3);
+    assert_eq!(last_delay, 50);
+}
+

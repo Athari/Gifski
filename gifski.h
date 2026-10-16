@@ -173,6 +173,14 @@ typedef struct GifskiSettings {
    * Anti-aliased edges and non-dithered threshold (0-255, 0 = default) when `GIFSKI_SETTINGS_ALPHA_THRESHOLDS` is set in `mask`.
    */
   uint8_t alpha_mid;
+  /**
+   * Temporal radius for post-dither denoising (0=off, 1=3 frames, 2=5 frames). 0 defaults to disabled.
+   */
+  uint8_t dither_denoise_radius;
+  /**
+   * Color distance threshold (0-255) for dither denoising. 0 defaults to 16.
+   */
+  uint8_t dither_denoise_threshold;
 } GifskiSettings;
 
 typedef enum GifskiError {

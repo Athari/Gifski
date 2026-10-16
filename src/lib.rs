@@ -62,6 +62,7 @@ mod minipool;
 
 use crossbeam_channel::{Receiver, Sender};
 use std::cell::Cell;
+use std::collections::VecDeque;
 use std::io::prelude::*;
 use std::num::NonZeroU8;
 use std::rc::Rc;
@@ -191,6 +192,11 @@ pub struct Settings {
     pub alpha_high: u8,
     /// Threshold used for anti-aliased edges and non-dithered alpha (0-255). `None` defaults to `low + (high - low) / 3 * 2` (92 with defaults).
     pub alpha_mid: Option<u8>,
+    /// Temporal radius for post-dither denoising of stray oscillating pixels (0=off, 1=3 frames, 2=5 frames). Defaults to 0.
+    pub dither_denoise_radius: u8,
+    /// Color distance threshold (0-255) for dither denoising. Differences above this are considered content and preserved. Defaults to 16.
+    #[default = 16]
+    pub dither_denoise_threshold: u8,
 }
 
 impl Settings {
@@ -326,6 +332,17 @@ struct FrameMessage {
     screen_height: u16,
 }
 
+struct BufferedRemap {
+    ordinal_frame_number: usize,
+    frame_index: usize,
+    end_pts: f64,
+    dispose: DisposalMethod,
+    has_next_frame: bool,
+    source_image: Option<ImgVec<RGBA8>>,
+    raw_image8: ImgVec<u8>,
+    image8_pal: Vec<RGBA8>,
+}
+
 /// Start new encoding on two threads.
 ///
 /// Encoding is always multi-threaded, and the `Collector` and `Writer`
@@ -395,6 +412,9 @@ pub fn new(settings: Settings) -> GifResult<(Collector, Writer)> {
     }
     if settings.alpha_mid.is_some_and(|mid| mid < settings.alpha_low || mid > settings.alpha_high) {
         return Err(Error::WrongSize("alpha_mid must be between alpha_low and alpha_high".into()));
+    }
+    if settings.dither_denoise_radius > 2 {
+        return Err(Error::WrongSize("dither_denoise_radius must be 0, 1, or 2".into()));
     }
 
     let max_threads = thread::available_parallelism().map(|t| t.get().min(255) as u8).unwrap_or(8);
@@ -1098,6 +1118,9 @@ impl Writer {
     }
 
     fn remap_frames(&self, mut inputs: OrdQueueIter<RemapMessage>, write_queue: Sender<FrameMessage>) -> CatResult<()> {
+        if self.settings.dither_denoise_radius > 0 && self.settings.color_dithering.is_ordered() {
+            return self.remap_frames_with_denoise(inputs, write_queue);
+        }
         let mut frame_index = 0;
         let first_frame = inputs.next().ok_or(Error::NoFrames)?;
         let mut screen = gif_dispose::Screen::new(first_frame.liq_image.width(), first_frame.liq_image.height(), None);
@@ -1159,6 +1182,162 @@ impl Writer {
             frame_index += 1;
             next_frame = inputs.next();
         }
+        Ok(())
+    }
+
+    fn remap_frames_with_denoise(&self, mut inputs: OrdQueueIter<RemapMessage>, write_queue: Sender<FrameMessage>) -> CatResult<()> {
+        let first_frame = inputs.next().ok_or(Error::NoFrames)?;
+        let mut screen = gif_dispose::Screen::new(first_frame.liq_image.width(), first_frame.liq_image.height(), None);
+
+        #[cfg(debug_assertions)]
+        let mut debug_screen = gif_dispose::Screen::new(first_frame.liq_image.width(), first_frame.liq_image.height(), None);
+
+        let mut dither_context = DitherColorContext::new();
+
+        let radius = self.settings.dither_denoise_radius;
+        let threshold = self.settings.dither_denoise_threshold;
+        let exact_match = self.settings.effective_motion_quality() == 100;
+
+        let remap_one = |msg: RemapMessage, frame_index: usize, dither_context: &mut DitherColorContext| -> CatResult<BufferedRemap> {
+            let RemapMessage { ordinal_frame_number, end_pts, dispose, liq, remap, liq_image, out_buf, has_next_frame, source_image } = msg;
+            let (raw_image8, image8_pal) = self.remap(liq, remap, liq_image, None, out_buf, source_image.clone(), dither_context)?;
+            Ok(BufferedRemap {
+                ordinal_frame_number,
+                frame_index,
+                end_pts,
+                dispose,
+                has_next_frame,
+                source_image,
+                raw_image8,
+                image8_pal,
+            })
+        };
+
+        let mut next_input_idx = 0;
+        let mut curr = Some(remap_one(first_frame, next_input_idx, &mut dither_context)?);
+        next_input_idx += 1;
+
+        let mut future: VecDeque<BufferedRemap> = VecDeque::with_capacity(radius as usize);
+        while future.len() < radius as usize {
+            if let Some(msg) = inputs.next() {
+                future.push_back(remap_one(msg, next_input_idx, &mut dither_context)?);
+                next_input_idx += 1;
+            } else {
+                break;
+            }
+        }
+
+        let mut history: VecDeque<ImgVec<u8>> = VecDeque::with_capacity(radius as usize);
+
+        while let Some(mut current) = curr {
+            let width = current.raw_image8.width();
+            let height = current.raw_image8.height();
+
+            let effective_radius = if history.is_empty() || future.is_empty() {
+                0
+            } else if radius == 2 && history.len() >= 2 && future.len() >= 2 {
+                2
+            } else {
+                1
+            };
+
+            if effective_radius > 0 {
+                let trans_idx = current.image8_pal.iter().position(|p| p.a <= 128).map(|i| i as u8);
+                let (prev_slices, next_slices): (Vec<&[u8]>, Vec<&[u8]>) = if effective_radius == 1 {
+                    (vec![history.back().unwrap().buf().as_slice()], vec![future.front().unwrap().raw_image8.buf().as_slice()])
+                } else {
+                    (
+                        vec![history[1].buf().as_slice(), history[0].buf().as_slice()],
+                        vec![future[0].raw_image8.buf().as_slice(), future[1].raw_image8.buf().as_slice()],
+                    )
+                };
+
+                denoise_dithered_frame(
+                    current.raw_image8.buf_mut(),
+                    width,
+                    height,
+                    &prev_slices,
+                    &next_slices,
+                    &current.image8_pal,
+                    effective_radius,
+                    threshold,
+                    trans_idx,
+                );
+            }
+
+            // Save cleaned raw frame to history before background transparency is applied
+            history.push_back(current.raw_image8.clone());
+            if history.len() > radius as usize {
+                history.pop_front();
+            }
+
+            let pixels = screen.pixels_rgba();
+            let screen_width = pixels.width() as u16;
+            let screen_height = pixels.height() as u16;
+            let mut screen_after_dispose = screen.dispose_only();
+
+            // Transparency matching against background screen
+            let trans_idx = current.image8_pal.iter().position(|p| p.a <= 128).map(|i| i as u8);
+            if current.frame_index != 0 {
+                if let Some(trans_idx) = trans_idx {
+                    let bg = screen_after_dispose.pixels_rgba();
+                    let src_img = current.source_image.as_ref().expect("source_image required for ordered color dithering");
+                    for y in 0..height {
+                        let out_row = &mut current.raw_image8.buf_mut()[y * width..(y + 1) * width];
+                        let src_row = &src_img.buf()[y * src_img.stride()..y * src_img.stride() + width];
+                        let bg_row = &bg.buf()[y * bg.stride()..y * bg.stride() + width];
+                        apply_background_transparency(out_row, src_row, bg_row, &current.image8_pal, trans_idx, exact_match);
+                    }
+                }
+            }
+
+            let (image8_pal, transparent_index) = transparent_index_from_palette(current.image8_pal, current.raw_image8.as_mut());
+
+            #[cfg(debug_assertions)]
+            debug_screen.blit(Some(&image8_pal), current.dispose, 0, 0, current.raw_image8.as_ref(), transparent_index)?;
+
+            let mut image8 = current.raw_image8;
+            let (left, top) = if current.frame_index != 0 && current.has_next_frame {
+                let (left, top, new_width, new_height) = trim_image(image8.as_ref(), &image8_pal, transparent_index, current.dispose, screen_after_dispose.pixels_rgba())
+                    .unwrap_or((0, 0, 1, 1));
+                if new_width != image8.width() || new_height != image8.height() {
+                    let new_buf = image8.sub_image(left.into(), top.into(), new_width, new_height).to_contiguous_buf().0.into_owned();
+                    image8 = ImgVec::new(new_buf, new_width, new_height);
+                }
+                (left, top)
+            } else {
+                (0, 0)
+            };
+
+            screen_after_dispose.then_blit(Some(&image8_pal), current.dispose, left, top, image8.as_ref(), transparent_index)?;
+
+            #[cfg(debug_assertions)]
+            debug_assert!(debug_screen.pixels_rgba() == screen.pixels_rgba(), "fr {} {}/{} {}x{}", current.ordinal_frame_number, left, top, image8.width(), image8.height());
+
+            write_queue.send(FrameMessage {
+                frame_index: current.frame_index,
+                ordinal_frame_number: current.ordinal_frame_number,
+                end_pts: current.end_pts,
+                screen_width,
+                screen_height,
+                frame: GIFFrame {
+                    left,
+                    top,
+                    image: image8,
+                    pal: image8_pal,
+                    transparent_index,
+                    dispose: current.dispose,
+                },
+            })?;
+
+            // Advance curr from future
+            curr = future.pop_front();
+            if let Some(msg) = inputs.next() {
+                future.push_back(remap_one(msg, next_input_idx, &mut dither_context)?);
+                next_input_idx += 1;
+            }
+        }
+
         Ok(())
     }
 }
