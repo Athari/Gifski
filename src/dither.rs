@@ -29,11 +29,16 @@ impl DitherMatrix {
             Dithering::Blue16 => Some(Self { data: &BLUE_NOISE_16X16, width: 16, height: 16, max_val: 255 }),
             Dithering::Blue32 => Some(Self { data: &BLUE_NOISE_32X32, width: 32, height: 32, max_val: 255 }),
             Dithering::Blue64 => Some(Self { data: &BLUE_NOISE_64X64, width: 64, height: 64, max_val: 255 }),
+            Dithering::Checkerboard => Some(Self { data: &CHECKERBOARD_2X2, width: 2, height: 2, max_val: 1 }),
             _ => unreachable!(),
         }
     }
 }
 
+pub static CHECKERBOARD_2X2: [u8; 4] = [
+      0,   1,
+      1,   0,
+];
 pub static BAYER_2X2: [u8; 4] = [
       0,   3,
       2,   1,
@@ -604,7 +609,7 @@ pub fn dither_color(
     // Number of candidate colors per pixel. Thomas Knoll's pattern dithering algorithm
     // was originally designed for a 4x4 Bayer matrix using 16 candidates. For larger matrices
     // (e.g. 8x8 or 32x32 blue noise), candidate generation is capped at 16 to avoid performance degradation.
-    let k = (matrix.width * matrix.height).min(16);
+    let k = (matrix.max_val as usize + 1).min(matrix.width * matrix.height).min(16);
 
     if context.palette != palette || context.k != k || context.dithering_level != dithering_level {
         context.palette = palette.to_vec();

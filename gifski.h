@@ -80,6 +80,7 @@ typedef enum GifskiDithering : uint8_t {
   GIFSKI_DITHERING_BLUE16 = 6,
   GIFSKI_DITHERING_BLUE32 = 7,
   GIFSKI_DITHERING_BLUE64 = 8,
+  GIFSKI_DITHERING_CHECKERBOARD = 9,
 } GifskiDithering;
 
 typedef enum GifskiSettingsMask {

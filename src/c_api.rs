@@ -93,6 +93,7 @@ pub enum GifskiDithering {
     Blue16 = 6,
     Blue32 = 7,
     Blue64 = 8,
+    Checkerboard = 9,
 }
 
 impl GifskiDithering {
@@ -108,6 +109,7 @@ impl GifskiDithering {
             Self::Blue16 => Dithering::Blue16,
             Self::Blue32 => Dithering::Blue32,
             Self::Blue64 => Dithering::Blue64,
+            Self::Checkerboard => Dithering::Checkerboard,
         }
     }
 }

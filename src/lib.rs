@@ -130,6 +130,8 @@ pub enum Dithering {
     Blue32,
     #[strum(serialize = "blue64")]
     Blue64,
+    #[strum(serialize = "checkerboard")]
+    Checkerboard,
 }
 
 impl Dithering {
