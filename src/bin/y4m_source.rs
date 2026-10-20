@@ -1,4 +1,4 @@
-use crate::source::{DEFAULT_FPS, Fps, Source};
+use crate::source::{Fps, Source, MAX_DEFAULT_VIDEO_FPS};
 use crate::{BinResult, SrcPath};
 use gifski::Collector;
 use imgref::ImgVec;
@@ -35,19 +35,28 @@ impl Y4MDecoder {
             SrcPath::Stdin(buf) => Box::new(buf) as Box<BufReader<dyn Read>>,
         };
 
+        let decoder = Decoder::new(reader).map_err(|e| match e {
+            y4m::Error::EOF => "The y4m file is truncated or invalid",
+            y4m::Error::BadInput => "The y4m file contains invalid metadata",
+            y4m::Error::UnknownColorspace => "y4m uses an unusual color format that is not supported",
+            y4m::Error::OutOfMemory => "Out of memory, or the y4m file has bogus dimensions",
+            y4m::Error::ParseError(ParseError::InvalidY4M) => "The input is not a y4m file",
+            y4m::Error::ParseError(error) => return format!("y4m contains invalid data: {error}"),
+            y4m::Error::IoError(error) => return format!("I/O error when reading a y4m file: {error}"),
+        }.to_string())?;
+
+        if fps.fps.is_none() {
+            let framerate = decoder.get_framerate();
+            if framerate.num == 0 || framerate.den == 0 {
+                return Err("Video has no framerate metadata; specify --fps explicitly".into());
+            }
+        }
+
         Ok(Self {
             file_size,
             fps,
             in_color_space,
-            decoder: Decoder::new(reader).map_err(|e| match e {
-                y4m::Error::EOF => "The y4m file is truncated or invalid",
-                y4m::Error::BadInput => "The y4m file contains invalid metadata",
-                y4m::Error::UnknownColorspace => "y4m uses an unusual color format that is not supported",
-                y4m::Error::OutOfMemory => "Out of memory, or the y4m file has bogus dimensions",
-                y4m::Error::ParseError(ParseError::InvalidY4M) => "The input is not a y4m file",
-                y4m::Error::ParseError(error) => return format!("y4m contains invalid data: {error}"),
-                y4m::Error::IoError(error) => return format!("I/O error when reading a y4m file: {error}"),
-            }.to_string())?,
+            decoder,
         })
     }
 }
@@ -82,15 +91,41 @@ impl Source for Y4MDecoder {
                 Colorspace::C444p12 => 12,
                 _ => 12,
             };
-            file_size.saturating_sub(self.decoder.get_raw_params().len() as _) / (w * h * d * s / 4 + 6) as u64
+            let raw_frames = file_size.saturating_sub(self.decoder.get_raw_params().len() as _) / (w * h * d * s / 4 + 6) as u64;
+            let fps = self.decoder.get_framerate();
+            if fps.num > 0 && fps.den > 0 {
+                let source_fps = fps.num as f64 / fps.den as f64;
+                let wanted_fps = match self.fps.fps {
+                    Some(wanted) => f64::from(wanted),
+                    None => source_fps.min(MAX_DEFAULT_VIDEO_FPS as f64),
+                };
+                let ratio = (wanted_fps / source_fps).min(1.0);
+                (raw_frames as f64 * ratio).ceil() as u64
+            } else {
+                raw_frames
+            }
         })
     }
 
     fn collect(&mut self, c: &mut Collector) -> BinResult<()> {
         let fps = self.decoder.get_framerate();
-        let frame_time = 1. / (fps.num as f64 / fps.den as f64);
-        let wanted_fps = f64::from(self.fps.fps.unwrap_or(DEFAULT_FPS));
+        let source_fps = if fps.num > 0 && fps.den > 0 {
+            fps.num as f64 / fps.den as f64
+        } else if let Some(wanted) = self.fps.fps {
+            f64::from(wanted)
+        } else {
+            return Err("Video has no framerate metadata; specify --fps explicitly".into());
+        };
+        let frame_time = 1. / source_fps;
+        let wanted_fps = match self.fps.fps {
+            Some(wanted) => f64::from(wanted),
+            None => source_fps.min(MAX_DEFAULT_VIDEO_FPS as f64),
+        };
         let wanted_frame_time = 1. / wanted_fps;
+        let skip_frames = match self.fps.fps {
+            Some(wanted) => (f64::from(wanted) - source_fps).abs() > 1e-4,
+            None => source_fps > MAX_DEFAULT_VIDEO_FPS as f64,
+        };
         let width = self.decoder.get_width();
         let height = self.decoder.get_height();
         let raw_params_str = &*String::from_utf8_lossy(self.decoder.get_raw_params()).into_owned();
@@ -137,7 +172,7 @@ impl Source for Y4MDecoder {
                 Ok(frame) => {
                     let this_frame_pts = presentation_timestamp / f64::from(self.fps.speed);
                     presentation_timestamp += frame_time;
-                    if presentation_timestamp < wanted_pts {
+                    if skip_frames && presentation_timestamp < wanted_pts {
                         continue; // skip a frame
                     }
                     wanted_pts += wanted_frame_time;
@@ -220,5 +255,55 @@ impl Source for Y4MDecoder {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct TempY4m(PathBuf);
+    impl Drop for TempY4m {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    fn create_test_y4m(fps_num: u32, fps_den: u32) -> TempY4m {
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let count = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let mut path = std::env::temp_dir();
+        path.push(format!("gifski_test_{}_{count}.y4m", std::process::id()));
+        let mut file = std::fs::File::create(&path).expect("failed to create temp file");
+        let header = format!("YUV4MPEG2 W2 H2 F{fps_num}:{fps_den} Ip A0:0 C420\nFRAME\n\0\0\0\0\0\0");
+        file.write_all(header.as_bytes()).expect("failed to write y4m header");
+        file.flush().expect("failed to flush");
+        TempY4m(path)
+    }
+
+    #[test]
+    fn test_y4m_missing_framerate_fails_without_fps() {
+        let temp = create_test_y4m(0, 0);
+        let res = Y4MDecoder::new(SrcPath::Path(temp.0.clone()), Fps { fps: None, speed: 1.0 }, None);
+        assert!(res.is_err());
+        let err_msg = res.err().unwrap().to_string();
+        assert!(err_msg.contains("Video has no framerate metadata; specify --fps explicitly"), "unexpected error: {err_msg}");
+    }
+
+    #[test]
+    fn test_y4m_missing_framerate_succeeds_with_explicit_fps() {
+        let temp = create_test_y4m(0, 0);
+        let res = Y4MDecoder::new(SrcPath::Path(temp.0.clone()), Fps { fps: Some(25.0), speed: 1.0 }, None);
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn test_y4m_valid_framerate_succeeds_without_fps() {
+        let temp = create_test_y4m(24, 1);
+        let res = Y4MDecoder::new(SrcPath::Path(temp.0.clone()), Fps { fps: None, speed: 1.0 }, None);
+        assert!(res.is_ok());
     }
 }

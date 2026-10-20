@@ -70,9 +70,10 @@ fn bin_main() -> BinResult<()> {
                         .arg(Arg::new("fps")
                             .long("fps")
                             .short('r')
-                            .help("Frame rate of animation. If using PNG files as input, this means the speed, as all frames are kept.\n\
-                                   If video is used, it will be resampled to this constant rate by dropping and/or duplicating frames.\n\
-                                   Default is 20 for videos. No effect for PNG input. For GIF input, it will be used to drop frames if present.")
+                            .help("Frame rate of animation. If using PNG files as input, this means the speed (default: 20 fps).\n\
+                                   If video is used, it defaults to the source frame rate (capped at 50 fps),\n\
+                                   or resampled to this constant rate if specified.\n\
+                                   For GIF input, it will be used to drop frames if present.")
                             .value_parser(value_parser!(f32))
                             .value_name("num"))
                         .arg(Arg::new("fast-forward")

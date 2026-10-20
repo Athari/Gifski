@@ -32,3 +32,26 @@ impl Source for Lodecoder {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_png_default_fps() {
+        let decoder = Lodecoder::new(vec![], Fps { fps: None, speed: 1.0 });
+        assert_eq!(decoder.fps, 20.0);
+    }
+
+    #[test]
+    fn test_png_explicit_fps() {
+        let decoder = Lodecoder::new(vec![], Fps { fps: Some(30.0), speed: 1.0 });
+        assert_eq!(decoder.fps, 30.0);
+    }
+
+    #[test]
+    fn test_png_speed_multiplier() {
+        let decoder = Lodecoder::new(vec![], Fps { fps: None, speed: 2.0 });
+        assert_eq!(decoder.fps, 40.0);
+    }
+}
