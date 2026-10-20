@@ -629,3 +629,54 @@ fn dither_edge_threshold_encoding() {
     }
 }
 
+#[test]
+fn test_ordered_dither_local_palette_near_duplicate_transparency() {
+    let base_frame = load_frame(&frame_filename(1));
+
+    // Create a near-duplicate frame: add a tiny artifact noise of +1 to green channel for most pixels,
+    // and a single noticeable change at one pixel so the frame is not dropped as identical.
+    let mut noisy_frame = base_frame.clone();
+    for (i, px) in noisy_frame.pixels_mut().enumerate() {
+        if i == 0 {
+            px.r = px.r.wrapping_add(50);
+        } else {
+            px.g = px.g.saturating_add(1);
+        }
+    }
+
+    let (c, writer) = new(Settings {
+        color_dithering: Dithering::Bayer2,
+        global_palette: false,
+        motion_quality: Some(100),
+        quality: 100,
+        ..Settings::default()
+    }).unwrap();
+
+    let t = std::thread::spawn(move || {
+        c.add_frame_rgba(0, base_frame, 0.0).unwrap();
+        c.add_frame_rgba(1, noisy_frame, 0.1).unwrap();
+    });
+
+    let mut out = Vec::new();
+    writer.write(&mut out, &mut progress::NoProgress {}).unwrap();
+    t.join().unwrap();
+
+    let mut gif_opts = gif::DecodeOptions::new();
+    gif_opts.set_color_output(gif::ColorOutput::Indexed);
+    let mut decoder = gif_opts.read_info(&out[..]).unwrap();
+
+    let _frame0 = decoder.read_next_frame().unwrap().expect("Frame 0");
+    let frame1 = decoder.read_next_frame().unwrap().expect("Frame 1");
+
+    let trans_idx = frame1.transparent.expect("Frame 1 should have transparency index");
+    let total_pixels = frame1.buffer.len();
+    let trans_count = frame1.buffer.iter().filter(|&&px| px == trans_idx).count();
+    let trans_ratio = trans_count as f64 / total_pixels as f64;
+
+    assert!(
+        trans_ratio > 0.90,
+        "Near-duplicate frame should be mostly transparent (> 90%), got {trans_count}/{total_pixels} ({:.1}%)",
+        trans_ratio * 100.0
+    );
+}
+

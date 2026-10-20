@@ -702,7 +702,7 @@ impl Writer {
             let pal = res.palette_vec();
             pal_img.resize(width * height, 0);
             let src = source_image.as_ref().expect("source_image required for ordered color dithering");
-            let exact_match = self.settings.effective_motion_quality() == 100;
+            let exact_match = self.settings.global_palette && self.settings.effective_motion_quality() == 100;
             dither_color(
                 src.as_ref(),
                 &pal,
@@ -1201,7 +1201,7 @@ impl Writer {
 
         let radius = self.settings.dither_denoise_radius;
         let threshold = self.settings.dither_denoise_threshold;
-        let exact_match = self.settings.effective_motion_quality() == 100;
+        let exact_match = self.settings.global_palette && self.settings.effective_motion_quality() == 100;
 
         let remap_one = |msg: RemapMessage, frame_index: usize, dither_context: &mut DitherColorContext| -> CatResult<BufferedRemap> {
             let RemapMessage { ordinal_frame_number, end_pts, dispose, liq, remap, liq_image, out_buf, has_next_frame, source_image } = msg;
